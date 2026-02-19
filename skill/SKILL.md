@@ -144,6 +144,46 @@ image = Image.open(io.BytesIO(data))
 image.save("snapshot.jpg")
 ```
 
+## Camera Streaming (Best Practice)
+
+For continuous monitoring, use `CameraStreamer` instead of calling `get_front_camera_image()` in a loop. This pattern was proven optimal in connection-test Round 1 (30-40% lower RTT, lowest camera drop rates).
+
+```python
+from kachaka_core.camera import CameraStreamer
+from kachaka_core.connection import KachakaConnection
+
+conn = KachakaConnection.get("192.168.1.100")
+streamer = CameraStreamer(conn, interval=1.0, camera="front")
+streamer.start()
+
+# Main loop does status queries without camera blocking
+while patrolling:
+    status = queries.get_status()
+    frame = streamer.latest_frame  # non-blocking, returns latest captured frame
+    if frame:
+        process(frame["image_base64"])
+    time.sleep(1.0)
+
+streamer.stop()
+print(streamer.stats)  # {"total_frames": 120, "dropped": 3, "drop_rate_pct": 2.4}
+```
+
+### With callback
+
+```python
+def on_new_frame(frame: dict):
+    save_to_disk(frame["image_base64"])
+
+streamer = CameraStreamer(conn, interval=0.5, on_frame=on_new_frame)
+streamer.start()
+```
+
+### Back camera
+
+```python
+streamer = CameraStreamer(conn, camera="back")
+```
+
 ## Map
 
 ```python
@@ -237,6 +277,7 @@ def my_new_command(ip: str, param: str) -> dict:
 | Write your own retry logic | Use `@with_retry` decorator |
 | Forget to poll command status | Use `poll_until_complete()` |
 | Block main thread on long gRPC | Run in a separate thread |
+| Call `get_front_camera_image()` in tight loop | Use `CameraStreamer` for continuous capture |
 | Hard-code robot IP | Pass as parameter or env var |
 | Ignore `result["ok"]` | Always check before proceeding |
 | Call `sdk.move_to_location()` raw | Use `cmds.move_to_location()` which handles resolver |
