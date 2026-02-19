@@ -13,6 +13,7 @@ import logging
 from mcp.server.fastmcp import FastMCP
 
 from kachaka_core.commands import KachakaCommands
+from kachaka_core.camera import CameraStreamer
 from kachaka_core.connection import KachakaConnection
 from kachaka_core.queries import KachakaQueries
 
@@ -215,6 +216,70 @@ def capture_front_camera(ip: str) -> dict:
 def capture_back_camera(ip: str) -> dict:
     """Capture a JPEG from the back camera (returned as base64)."""
     return KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image()
+
+
+# ── Camera streaming ────────────────────────────────────────────────
+
+_streamers: dict[str, CameraStreamer] = {}
+
+
+def _streamer_key(ip: str, camera: str) -> str:
+    return f"{KachakaConnection._normalise_target(ip)}:{camera}"
+
+
+@mcp.tool()
+def start_camera_stream(ip: str, interval: float = 1.0, camera: str = "front") -> dict:
+    """Start continuous camera capture in a background thread.
+
+    Frames are captured every ``interval`` seconds without blocking other
+    operations.  Use ``get_camera_frame`` to retrieve the latest image.
+    """
+    conn = KachakaConnection.get(ip)
+    key = _streamer_key(ip, camera)
+    existing = _streamers.get(key)
+    if existing is not None and existing.is_running:
+        return {"ok": True, "message": "already running", "stats": existing.stats}
+    streamer = CameraStreamer(conn, interval=interval, camera=camera)
+    streamer.start()
+    _streamers[key] = streamer
+    return {"ok": True, "message": f"{camera} camera stream started"}
+
+
+@mcp.tool()
+def get_camera_frame(ip: str, camera: str = "front") -> dict:
+    """Get the latest frame from a running camera stream.
+
+    Must call ``start_camera_stream`` first.
+    """
+    key = _streamer_key(ip, camera)
+    streamer = _streamers.get(key)
+    if streamer is None or not streamer.is_running:
+        return {"ok": False, "error": "stream not started — call start_camera_stream first"}
+    frame = streamer.latest_frame
+    if frame is None:
+        return {"ok": False, "error": "no frame captured yet — try again shortly"}
+    return frame
+
+
+@mcp.tool()
+def stop_camera_stream(ip: str, camera: str = "front") -> dict:
+    """Stop a running camera stream."""
+    key = _streamer_key(ip, camera)
+    streamer = _streamers.pop(key, None)
+    if streamer is None:
+        return {"ok": True, "message": "no stream to stop"}
+    streamer.stop()
+    return {"ok": True, "message": f"{camera} camera stream stopped", "stats": streamer.stats}
+
+
+@mcp.tool()
+def get_camera_stats(ip: str, camera: str = "front") -> dict:
+    """Get capture statistics for a running camera stream."""
+    key = _streamer_key(ip, camera)
+    streamer = _streamers.get(key)
+    if streamer is None:
+        return {"ok": False, "error": "no stream active"}
+    return {"ok": True, **streamer.stats, "is_running": streamer.is_running}
 
 
 # ── Map ──────────────────────────────────────────────────────────────
