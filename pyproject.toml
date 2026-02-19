@@ -1,0 +1,26 @@
+[project]
+name = "kachaka-sdk-toolkit"
+version = "0.1.0"
+description = "Kachaka Robot SDK unified wrapper — shared core for MCP Server and Skill"
+requires-python = ">=3.10"
+dependencies = [
+    "kachaka-api>=3.10",
+    "grpcio>=1.66",
+    "mcp[cli]>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-mock"]
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["kachaka_core*", "mcp_server*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
+]
