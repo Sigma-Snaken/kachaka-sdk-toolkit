@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Callable, Optional
 
-from kachaka_core.connection import KachakaConnection
+from .connection import KachakaConnection
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,10 @@ class CameraStreamer:
 
         self._stop_event.set()
         self._thread.join(timeout=self._interval * 3)
-        logger.info("CameraStreamer stopped")
+        if self._thread.is_alive():
+            logger.warning("CameraStreamer thread did not stop within timeout")
+        else:
+            logger.info("CameraStreamer stopped")
 
     @property
     def latest_frame(self) -> Optional[dict]:
