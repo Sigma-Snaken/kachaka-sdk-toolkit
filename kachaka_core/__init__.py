@@ -7,5 +7,6 @@ All robot operations MUST go through this layer.
 from .connection import KachakaConnection
 from .commands import KachakaCommands
 from .queries import KachakaQueries
+from .camera import CameraStreamer
 
-__all__ = ["KachakaConnection", "KachakaCommands", "KachakaQueries"]
+__all__ = ["KachakaConnection", "KachakaCommands", "KachakaQueries", "CameraStreamer"]
