@@ -12,12 +12,15 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-mock"]
 
+[project.scripts]
+kachaka-setup = "kachaka_sdk_toolkit.setup_cli:main"
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["kachaka_core*", "mcp_server*"]
+include = ["kachaka_core*", "mcp_server*", "kachaka_sdk_toolkit*"]
 
 [dependency-groups]
 dev = [
