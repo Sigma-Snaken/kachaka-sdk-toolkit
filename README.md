@@ -91,19 +91,19 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/Sigma-Snaken/kachaka-sdk-toolkit.git
 cd kachaka-sdk-toolkit
-
-# Install with uv (recommended)
-uv sync
-
-# Or install with pip in editable mode
 pip install -e .
-
-# Install dev dependencies
-pip install -e ".[dev]"
+kachaka-setup
 ```
+
+`kachaka-setup` registers the MCP Server and Skill with Claude Code automatically. To remove:
+
+```bash
+kachaka-setup uninstall
+```
+
+For development dependencies: `pip install -e ".[dev]"`
 
 ### Quick Start
 
@@ -474,6 +474,10 @@ All tests use the `_clean_pool` autouse fixture to ensure isolation between test
 
 ```
 kachaka-sdk-toolkit/
+|-- kachaka_sdk_toolkit/        # Setup CLI
+|   |-- __init__.py
+|   +-- setup_cli.py           # kachaka-setup command (MCP + Skill registration)
+|
 |-- kachaka_core/              # Shared core library
 |   |-- __init__.py            # Public exports: KachakaConnection, KachakaCommands, KachakaQueries, CameraStreamer
 |   |-- connection.py          # Thread-safe pooled gRPC connections
