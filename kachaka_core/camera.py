@@ -13,9 +13,12 @@ import base64
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from .connection import KachakaConnection
+
+if TYPE_CHECKING:
+    from .detection import ObjectDetector
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,8 @@ class CameraStreamer:
         interval: float = 1.0,
         camera: str = "front",
         on_frame: Optional[Callable[[dict], None]] = None,
+        detect: bool = False,
+        annotate: bool = False,
     ) -> None:
         if camera not in _VALID_CAMERAS:
             raise ValueError(
@@ -63,6 +68,21 @@ class CameraStreamer:
         # Counters (only written by the capture thread, reads are atomic on CPython)
         self._total_frames: int = 0
         self._dropped: int = 0
+
+        # Detection overlay support
+        # If annotate requested, force detect on
+        if annotate and not detect:
+            detect = True
+        self._detect = detect
+        self._annotate = annotate
+        self._detector: Optional[ObjectDetector] = None
+        if detect:
+            from .detection import ObjectDetector
+
+            self._detector = ObjectDetector(conn)
+
+        # Detection results cache
+        self._latest_detections: Optional[list] = None
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -93,6 +113,12 @@ class CameraStreamer:
         """Return the most recently captured frame (thread-safe)."""
         with self._lock:
             return self._latest_frame
+
+    @property
+    def latest_detections(self) -> Optional[list]:
+        """Most recent detection results (dict list). Requires detect=True."""
+        with self._lock:
+            return self._latest_detections
 
     @property
     def is_running(self) -> bool:
@@ -127,14 +153,40 @@ class CameraStreamer:
             try:
                 img = capture_fn()
                 b64 = base64.b64encode(img.data).decode()
+
+                # Detection (if enabled)
+                det_objects = None
+                if self._detect and self._detector is not None:
+                    try:
+                        det_result = self._detector.get_detections()
+                        if det_result["ok"]:
+                            det_objects = det_result["objects"]
+                    except Exception:
+                        logger.debug("Detection error in streamer", exc_info=True)
+
+                # Annotate (if enabled and detections available)
+                if self._annotate and det_objects:
+                    try:
+                        annotated_bytes = self._detector.annotate_frame(img.data, det_objects)
+                        b64 = base64.b64encode(annotated_bytes).decode()
+                    except Exception:
+                        logger.debug("Annotation error in streamer", exc_info=True)
+
                 frame: dict = {
                     "ok": True,
                     "image_base64": b64,
                     "format": img.format or "jpeg",
                     "timestamp": time.time(),
                 }
+
+                # Add detection results to frame if available
+                if det_objects is not None:
+                    frame["objects"] = det_objects
+
                 with self._lock:
                     self._latest_frame = frame
+                    if det_objects is not None:
+                        self._latest_detections = det_objects
 
                 # Fire callback (errors in callback must not kill the thread)
                 if self._on_frame is not None:

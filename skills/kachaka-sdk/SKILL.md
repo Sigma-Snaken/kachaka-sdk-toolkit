@@ -204,9 +204,32 @@ ctrl = RobotController(
 4. Completion detected when: state leaves RUNNING/PENDING **or** `command_id` changes
 5. `GetLastCommandResult` with `command_id` verification — confirms result is for our command
 
-### Important notes
+### Error description enrichment
+
+Error results now include human-readable descriptions fetched from the robot:
+
+```python
+result = ctrl.move_to_location("nonexistent")
+# {"ok": false, "error_code": 10253, "error": "error_code=10253: No destinations registered", ...}
+
+# When a command is cancelled by another:
+# {"ok": false, "error_code": 10001, "error": "error_code=10001: {action_name} has been interrupted", ...}
+```
+
+- `_resolve_error_description()` calls `sdk.get_robot_error_code()` on each error (no cache — avoids firmware mismatch)
+- Falls back gracefully to `error_code=NNNNN` if the fetch fails or code is unknown
+- Same enrichment in both `controller.py` and `commands.py`
+
+### Racing condition behavior (tested on real robot)
 
 - `_execute_command` is **not thread-safe** — serialise command calls from the caller side
+- **Command B cancels A**: A receives `error_code=10001` (interrupted), B completes normally
+- **Concurrent commands**: One wins, the other gets TIMEOUT (its command_id never appears in GetLastCommandResult)
+- **Short timeout + new command**: Robot keeps moving after controller timeout; `cancel_all=True` (default) on the new command cancels the residual movement
+- **No deadlock observed** — concurrent use is unsafe but not catastrophic; no execution lock needed
+
+### Other notes
+
 - `metrics` is not a snapshot — read after command execution, not concurrently
 - `state` property returns a thread-safe `copy.copy()` snapshot
 - Background thread is a daemon — auto-exits when the process ends
@@ -275,9 +298,12 @@ All `@with_retry` methods automatically retry on transient gRPC errors (UNAVAILA
 Every method returns a dict:
 
 ```python
-{"ok": True, ...}                              # Success
-{"ok": False, "error": "UNAVAILABLE: ...",     # Failure
+{"ok": True, ...}                              # Success (KachakaCommands)
+{"ok": False, "error": "UNAVAILABLE: ...",     # gRPC failure (KachakaCommands)
  "retryable": True, "attempts": 3}
+{"ok": False, "error_code": 10253,             # Robot error (both)
+ "error": "error_code=10253: No destinations registered"}
+{"ok": False, "error": "TIMEOUT", "timeout": 120}  # Timeout (RobotController)
 ```
 
 ### Custom retry for new functions

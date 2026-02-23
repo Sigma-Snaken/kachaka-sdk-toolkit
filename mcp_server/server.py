@@ -229,21 +229,29 @@ def _streamer_key(ip: str, camera: str) -> str:
 
 
 @mcp.tool()
-def start_camera_stream(ip: str, interval: float = 1.0, camera: str = "front") -> dict:
+def start_camera_stream(
+    ip: str, interval: float = 1.0, camera: str = "front",
+    detect: bool = False, annotate: bool = False,
+) -> dict:
     """Start continuous camera capture in a background thread.
 
     Frames are captured every ``interval`` seconds without blocking other
     operations.  Use ``get_camera_frame`` to retrieve the latest image.
+
+    Set detect=True to also run object detection each frame.
+    Set annotate=True to draw bounding boxes on captured frames.
     """
     conn = KachakaConnection.get(ip)
     key = _streamer_key(ip, camera)
     existing = _streamers.get(key)
     if existing is not None and existing.is_running:
         return {"ok": True, "message": "already running", "stats": existing.stats}
-    streamer = CameraStreamer(conn, interval=interval, camera=camera)
+    streamer = CameraStreamer(conn, interval=interval, camera=camera,
+                              detect=detect, annotate=annotate)
     streamer.start()
     _streamers[key] = streamer
-    return {"ok": True, "message": f"{camera} camera stream started"}
+    return {"ok": True, "message": f"{camera} camera stream started",
+            "detect": detect, "annotate": annotate}
 
 
 @mcp.tool()
@@ -281,6 +289,37 @@ def get_camera_stats(ip: str, camera: str = "front") -> dict:
     if streamer is None:
         return {"ok": False, "error": "no stream active"}
     return {"ok": True, **streamer.stats, "is_running": streamer.is_running}
+
+
+# ── Object Detection ────────────────────────────────────────────────
+
+@mcp.tool()
+def get_object_detection(ip: str) -> dict:
+    """Detect objects (person, shelf, charger, door) visible to the robot.
+
+    Returns bounding boxes with confidence scores and distances.
+    """
+    from kachaka_core.detection import ObjectDetector
+    return ObjectDetector(KachakaConnection.get(ip)).get_detections()
+
+
+@mcp.tool()
+def capture_with_detection(ip: str, camera: str = "front", annotate: bool = True) -> dict:
+    """Capture camera image with object detection overlay.
+
+    When annotate=True, bounding boxes are drawn on the image.
+    Returns both the image (base64) and detection results.
+    """
+    from kachaka_core.detection import ObjectDetector
+    import base64
+    detector = ObjectDetector(KachakaConnection.get(ip))
+    result = detector.capture_with_detections(camera=camera)
+    if result["ok"] and annotate and result.get("objects"):
+        raw = base64.b64decode(result["image_base64"])
+        annotated = detector.annotate_frame(raw, result["objects"])
+        result["image_base64"] = base64.b64encode(annotated).decode()
+        result["annotated"] = True
+    return result
 
 
 # ── Map ──────────────────────────────────────────────────────────────
