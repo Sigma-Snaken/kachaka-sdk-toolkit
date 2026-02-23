@@ -45,6 +45,8 @@ class TestControllerMetrics:
         m.reset()
         assert m.poll_rtt_list == []
         assert m.poll_count == 0
+        assert m.poll_success_count == 0
+        assert m.poll_failure_count == 0
 
 
 class TestCallWithRetry:
