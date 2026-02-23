@@ -90,3 +90,117 @@ def _call_with_retry(
     if last_err is not None:
         raise last_err
     raise TimeoutError("deadline exceeded without any attempt")
+
+
+class RobotController:
+    """Background state polling + non-blocking command execution for Kachaka.
+
+    Usage::
+
+        conn = KachakaConnection.get("192.168.50.133")
+        ctrl = RobotController(conn)
+        ctrl.start()
+
+        state = ctrl.state  # thread-safe snapshot
+        result = ctrl.move_to_location("辦公室", timeout=120)
+
+        ctrl.stop()
+    """
+
+    def __init__(
+        self,
+        conn: KachakaConnection,
+        *,
+        fast_interval: float = 1.0,
+        slow_interval: float = 30.0,
+        retry_delay: float = 1.0,
+        poll_interval: float = 1.0,
+    ) -> None:
+        self._conn = conn
+        self._fast_interval = fast_interval
+        self._slow_interval = slow_interval
+        self._retry_delay = retry_delay
+        self._poll_interval = poll_interval
+
+        self._state = RobotState()
+        self._state_lock = threading.Lock()
+        self._metrics = ControllerMetrics()
+
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # ── Public API ────────────────────────────────────────────────
+
+    @property
+    def state(self) -> RobotState:
+        """Return a thread-safe snapshot of the current robot state."""
+        with self._state_lock:
+            return copy.copy(self._state)
+
+    @property
+    def metrics(self) -> ControllerMetrics:
+        """Return reference to the metrics object."""
+        return self._metrics
+
+    def reset_metrics(self) -> None:
+        """Clear all collected metrics."""
+        self._metrics.reset()
+
+    def start(self) -> None:
+        """Start the background state polling thread. No-op if already running."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._state_loop, daemon=True)
+        self._thread.start()
+        logger.info(
+            "RobotController started (fast=%.1fs, slow=%.1fs)",
+            self._fast_interval,
+            self._slow_interval,
+        )
+
+    def stop(self) -> None:
+        """Stop the background state polling thread. No-op if not running."""
+        if self._thread is None or not self._thread.is_alive():
+            return
+        self._stop_event.set()
+        self._thread.join(timeout=self._fast_interval * 3)
+        if self._thread.is_alive():
+            logger.warning("State polling thread did not stop within timeout")
+        else:
+            logger.info("RobotController stopped")
+
+    # ── State polling loop ────────────────────────────────────────
+
+    def _state_loop(self) -> None:
+        """Background thread: periodically read robot state."""
+        sdk = self._conn.client
+        last_slow = 0.0
+
+        while not self._stop_event.is_set():
+            now = time.time()
+
+            # Fast cycle: pose + command state
+            try:
+                pose = sdk.get_robot_pose()
+                is_running = sdk.is_command_running()
+                with self._state_lock:
+                    self._state.pose_x = pose.x
+                    self._state.pose_y = pose.y
+                    self._state.pose_theta = pose.theta
+                    self._state.is_command_running = is_running
+                    self._state.last_updated = now
+            except Exception:
+                logger.debug("State poll (fast) error", exc_info=True)
+
+            # Slow cycle: battery
+            if now - last_slow >= self._slow_interval:
+                try:
+                    battery_pct, _ = sdk.get_battery_info()
+                    with self._state_lock:
+                        self._state.battery_pct = int(battery_pct)
+                    last_slow = now
+                except Exception:
+                    logger.debug("State poll (slow/battery) error", exc_info=True)
+
+            self._stop_event.wait(self._fast_interval)
