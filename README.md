@@ -83,7 +83,7 @@ graph TD
 #### Option A: Claude Code Plugin (recommended)
 
 ```bash
-/plugin marketplace add Sigma-Snaken/kachaka-marketplace
+/plugin marketplace add Sigma-Snaken/kachaka-sdk-toolkit
 /plugin install kachaka
 ```
 
