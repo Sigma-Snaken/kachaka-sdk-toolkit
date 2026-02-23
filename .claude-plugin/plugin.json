@@ -1,6 +1,6 @@
 {
   "name": "kachaka",
-  "description": "Kachaka Robot SDK — 38 MCP tools for AI-driven robot control, plus development skill reference",
+  "description": "Kachaka Robot SDK — 40 MCP tools for AI-driven robot control, plus development skill reference",
   "version": "0.1.0",
   "author": {
     "name": "Sigma-Snaken"
@@ -8,5 +8,5 @@
   "homepage": "https://github.com/Sigma-Snaken/kachaka-sdk-toolkit",
   "repository": "https://github.com/Sigma-Snaken/kachaka-sdk-toolkit",
   "license": "MIT",
-  "keywords": ["kachaka", "robot", "mcp", "grpc", "camera"]
+  "keywords": ["kachaka", "robot", "mcp", "grpc", "camera", "detection"]
 }

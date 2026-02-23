@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 38 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 40 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -10,51 +10,39 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 
 ## Architecture
 
-```
-+--------------------------------------------------+
-|                  Consumers                        |
-|                                                   |
-|  +----------------+   +-----+   +--------------+  |
-|  | MCP Server     |   |Skill|   | Your Script  |  |
-|  | (38 tools,     |   | .md |   | or App       |  |
-|  |  stdio/SSE)    |   |     |   |              |  |
-|  +-------+--------+   +--+--+   +------+-------+  |
-|          |                |            |           |
-+----------|----------------|------------|----------+
-           |                |            |
-           v                v            v
-+--------------------------------------------------+
-|               kachaka_core (shared)               |
-|                                                   |
-|  +-------------+  +-----------+  +-----------+    |
-|  | connection  |  | commands  |  |  queries  |    |
-|  | .py         |  | .py       |  |  .py      |    |
-|  |             |  |           |  |           |    |
-|  | Pool mgmt   |  | Movement  |  | Status    |    |
-|  | Health check |  | Shelf ops |  | Locations |    |
-|  | Resolver    |  | Speech    |  | Camera    |    |
-|  | Normalise   |  | Manual    |  | Map       |    |
-|  +------+------+  +-----+-----+  +-----+-----+    |
-|         |              |              |            |
-|  +------+--------------+--------------+------+     |
-|  |          error_handling.py                |     |
-|  |   @with_retry  |  format_grpc_error       |     |
-|  |   Exponential backoff on transient errors |     |
-|  +-------------------------------------------+     |
-|                                                   |
-|  +-------------------------------------------+     |
-|  |            camera.py                      |     |
-|  |   CameraStreamer (daemon thread)          |     |
-|  |   Thread-safe frame storage               |     |
-|  |   Callback support, stats tracking        |     |
-|  +-------------------------------------------+     |
-+--------------------------------------------------+
-           |
-           v
-+--------------------------------------------------+
-|          kachaka-api SDK (gRPC)                   |
-|          KachakaApiClient -> Robot @ :26400       |
-+--------------------------------------------------+
+```mermaid
+graph TD
+    subgraph Consumers
+        MCP["MCP Server<br/>(40 tools, stdio)"]
+        SKILL["Skill .md"]
+        APP["Your Script<br/>or App"]
+    end
+
+    subgraph kachaka_core["kachaka_core (shared)"]
+        CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Normalise"]
+        CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Manual"]
+        QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
+        ERR["error_handling.py<br/>@with_retry · format_grpc_error<br/>Exponential backoff"]
+        CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
+        DET["detection.py<br/>ObjectDetector (on-device)<br/>Bbox annotation (PIL)"]
+        CTRL["controller.py<br/>RobotController<br/>Background polling · Metrics"]
+    end
+
+    SDK["kachaka-api SDK (gRPC)<br/>KachakaApiClient → Robot :26400"]
+
+    MCP --> CONN
+    MCP --> CMD
+    MCP --> QRY
+    MCP --> DET
+    SKILL --> kachaka_core
+    APP --> kachaka_core
+    CONN --> ERR
+    CMD --> ERR
+    QRY --> ERR
+    DET --> ERR
+    CTRL --> CONN
+    CAM --> DET
+    kachaka_core --> SDK
 ```
 
 ## Features
@@ -63,8 +51,10 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 - **Automatic retry** -- Transient gRPC errors (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED) are retried with exponential backoff. Non-retryable errors fail immediately.
 - **Unified response format** -- Every method returns `{"ok": True, ...}` or `{"ok": False, "error": "...", "retryable": ...}`.
 - **Name + ID resolver** -- Commands accept location/shelf names or IDs interchangeably. The resolver patches the upstream SDK to support both.
-- **Background camera streaming** -- `CameraStreamer` runs a daemon thread for continuous JPEG capture without blocking the main loop.
-- **MCP Server** -- 38 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
+- **Background camera streaming** -- `CameraStreamer` runs a daemon thread for continuous JPEG capture without blocking the main loop. Optional detection overlay draws bounding boxes on frames.
+- **Object detection** -- `ObjectDetector` wraps the on-device detector (person, shelf, charger, door) and can annotate frames with bounding boxes via PIL.
+- **Enriched error messages** -- Failed commands include human-readable error descriptions fetched from the robot firmware.
+- **MCP Server** -- 40 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -255,11 +245,31 @@ streamer.start()
 streamer = CameraStreamer(conn, camera="back")
 ```
 
+### With Detection Overlay
+
+```python
+streamer = CameraStreamer(conn, interval=1.0, detect=True, annotate=True)
+streamer.start()
+
+# latest_frame now includes "objects" key + bbox drawn on image
+frame = streamer.latest_frame
+# {"ok": True, "image_base64": "...", "objects": [...], "timestamp": ...}
+
+# Detection results separately
+detections = streamer.latest_detections
+# [{"label": "person", "label_id": 1, "roi": {...}, "score": 0.95, "distance": 2.3}, ...]
+```
+
+- `detect=True, annotate=False` -- raw frame + detection results (no bbox)
+- `detect=True, annotate=True` -- annotated frame + detection results
+- Default `detect=False, annotate=False` -- unchanged behavior
+
 ### Properties
 
 | Property | Type | Description |
 |----------|------|-------------|
 | `latest_frame` | `dict \| None` | Most recent frame (thread-safe read) |
+| `latest_detections` | `list \| None` | Most recent detection results (requires `detect=True`) |
 | `is_running` | `bool` | Whether the capture thread is alive |
 | `stats` | `dict` | `{total_frames, dropped, drop_rate_pct}` |
 
@@ -268,6 +278,7 @@ streamer = CameraStreamer(conn, camera="back")
 - Thread is a **daemon** -- it will not prevent interpreter exit
 - `stop()` signals the thread and waits up to `interval * 3` seconds
 - Errors in capture increment the `dropped` counter but never crash the thread
+- Detection failure never blocks frame capture (logged and skipped)
 - Callback exceptions are caught and logged, never propagated
 - `start()` on an already-running streamer is a no-op
 - `stop()` on a non-running streamer is a no-op
@@ -326,9 +337,53 @@ ctrl = RobotController(
 | Background state monitoring | `RobotController` |
 | Blocking call with `@with_retry` | `KachakaCommands` |
 
+## ObjectDetector
+
+On-device object detection (person, shelf, charger, door) with optional bounding-box annotation via PIL.
+
+### Basic Usage
+
+```python
+from kachaka_core import KachakaConnection, ObjectDetector
+
+conn = KachakaConnection.get("192.168.1.100")
+det = ObjectDetector(conn)
+
+# Get current detections
+result = det.get_detections()
+# {"ok": True, "objects": [{"label": "person", "label_id": 1,
+#   "roi": {"x": 100, "y": 50, "width": 200, "height": 300},
+#   "score": 0.79, "distance": 2.3}, ...]}
+
+# Capture image + detections together
+result = det.capture_with_detections(camera="front")
+# {"ok": True, "image_base64": "...", "format": "jpeg", "objects": [...]}
+
+# Draw bounding boxes on raw JPEG bytes
+import base64
+raw = base64.b64decode(result["image_base64"])
+annotated = det.annotate_frame(raw, result["objects"])
+# Returns annotated JPEG bytes (not base64)
+```
+
+### Labels
+
+| label_id | Label | Bbox Color |
+|----------|-------|------------|
+| 0 | unknown | pink |
+| 1 | person | green |
+| 2 | shelf | blue |
+| 3 | charger | cyan |
+| 4 | door | red |
+
+### Notes
+
+- `distance` is `None` when `distance_median <= 0` (close range or sensor unavailable)
+- `annotate_frame` uses PIL `ImageDraw` -- does not depend on `kachaka_api.util.vision`
+
 ## MCP Server
 
-The MCP Server exposes 38 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 40 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -426,10 +481,17 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 |------|-------------|
 | `capture_front_camera` | Single JPEG from front camera (base64) |
 | `capture_back_camera` | Single JPEG from back camera (base64) |
-| `start_camera_stream` | Start background capture thread |
+| `start_camera_stream` | Start background capture (options: `detect`, `annotate`) |
 | `get_camera_frame` | Get latest frame from stream |
 | `stop_camera_stream` | Stop background capture |
 | `get_camera_stats` | Stream statistics (frames, drops) |
+
+#### Object Detection (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `get_object_detection` | Detect objects (person, shelf, charger, door) with scores + distances |
+| `capture_with_detection` | Camera capture with detection overlay (bounding boxes) |
 
 #### Map (2 tools)
 
@@ -473,11 +535,14 @@ Every method in the toolkit returns a dict:
 # Success
 {"ok": True, "action": "move_to_location", "target": "Kitchen"}
 
-# Failure (non-retryable)
+# Failure (gRPC, non-retryable)
 {"ok": False, "error": "INVALID_ARGUMENT: unknown location", "retryable": False}
 
-# Failure (retries exhausted)
+# Failure (gRPC, retries exhausted)
 {"ok": False, "error": "UNAVAILABLE: connection refused", "retryable": True, "attempts": 3}
+
+# Failure (robot error with enriched description)
+{"ok": False, "error_code": 10253, "error": "error_code=10253: No destinations registered"}
 ```
 
 ### Custom Retry Configuration
@@ -531,57 +596,65 @@ pytest tests/test_commands.py::TestRetry
 | `test_commands.py` | 15 | Movement, shelf ops, speech, retry, cancel, stop, polling |
 | `test_queries.py` | 13 | Status, locations, shelves, camera, map, errors, info |
 | `test_camera.py` | 24 | Lifecycle, front/back capture, stats, errors, callbacks, thread safety |
-| `test_controller.py` | 24 | State polling, command execution, metrics, move/shelf/return, edge cases |
-| **Total** | **88** | |
+| `test_controller.py` | 33 | State polling, command execution, metrics, move/shelf/return, racing conditions |
+| `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
+| **Total** | **111** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
 ## Project Structure
 
-```
-kachaka-sdk-toolkit/
-|-- kachaka_sdk_toolkit/        # Setup CLI
-|   |-- __init__.py
-|   +-- setup_cli.py           # kachaka-setup command (MCP + Skill registration)
-|
-|-- kachaka_core/              # Shared core library
-|   |-- __init__.py            # Public exports: KachakaConnection, KachakaCommands, KachakaQueries, CameraStreamer, RobotController
-|   |-- connection.py          # Thread-safe pooled gRPC connections
-|   |-- commands.py            # Robot action commands (movement, shelf, speech, manual control)
-|   |-- queries.py             # Read-only status queries (pose, battery, camera, map, etc.)
-|   |-- camera.py              # CameraStreamer: background daemon thread capture
-|   |-- controller.py          # RobotController: background state polling + non-blocking commands
-|   +-- error_handling.py      # @with_retry decorator, format_grpc_error
-|
-|-- mcp_server/                # MCP Server layer
-|   |-- __init__.py
-|   +-- server.py              # 38 tools wrapping kachaka_core (stdio transport)
-|
-|-- skills/                    # Plugin skills (auto-discovered by Claude Code)
-|   +-- kachaka-sdk/           # Skill document for LLM agents
-|       |-- SKILL.md           # Full API reference + anti-patterns
-|       +-- examples/
-|           +-- typical_usage.py  # Patrol script example
-|
-|-- .claude-plugin/            # Claude Code plugin metadata
-|   +-- plugin.json
-|
-|-- .mcp.json                  # MCP server config for plugin installs
-|
-|-- tests/                     # pytest test suite (no live robot needed)
-|   |-- __init__.py
-|   |-- test_connection.py
-|   |-- test_commands.py
-|   |-- test_queries.py
-|   |-- test_controller.py
-|   +-- test_camera.py
-|
-|-- docs/                      # Design documents and plans
-|   +-- plans/
-|
-|-- pyproject.toml              # Project metadata, dependencies
-|-- uv.lock                    # Locked dependency versions
-+-- .gitignore
+```mermaid
+graph LR
+    ROOT["kachaka-sdk-toolkit/"]
+
+    subgraph core["kachaka_core/ — Shared core library"]
+        C_INIT["__init__.py — Public exports"]
+        C_CONN["connection.py — Thread-safe pooled gRPC"]
+        C_CMD["commands.py — Movement, shelf, speech, manual"]
+        C_QRY["queries.py — Status, camera, map queries"]
+        C_CAM["camera.py — CameraStreamer daemon thread"]
+        C_CTRL["controller.py — RobotController + polling"]
+        C_DET["detection.py — ObjectDetector + annotation"]
+        C_ERR["error_handling.py — @with_retry, format_grpc_error"]
+    end
+
+    subgraph mcp["mcp_server/ — MCP Server layer"]
+        M_INIT["__init__.py"]
+        M_SRV["server.py — 40 tools, stdio transport"]
+    end
+
+    subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
+        S_MD["SKILL.md — Full API reference"]
+        S_EX["examples/typical_usage.py"]
+    end
+
+    subgraph plugin[".claude-plugin/ — Plugin metadata"]
+        P_JSON["plugin.json"]
+    end
+
+    subgraph tests["tests/ — pytest suite (111 tests)"]
+        T_CONN["test_connection.py"]
+        T_CMD["test_commands.py"]
+        T_QRY["test_queries.py"]
+        T_CAM["test_camera.py"]
+        T_CTRL["test_controller.py"]
+        T_DET["test_detection.py"]
+    end
+
+    subgraph cli["kachaka_sdk_toolkit/ — Setup CLI"]
+        CLI_INIT["__init__.py"]
+        CLI_SETUP["setup_cli.py — kachaka-setup command"]
+    end
+
+    ROOT --- core
+    ROOT --- mcp
+    ROOT --- skills
+    ROOT --- plugin
+    ROOT --- tests
+    ROOT --- cli
+    ROOT --- MCP_JSON[".mcp.json"]
+    ROOT --- TOML["pyproject.toml"]
 ```
 
 ## Anti-patterns
