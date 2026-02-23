@@ -8,5 +8,6 @@ from .connection import KachakaConnection
 from .commands import KachakaCommands
 from .queries import KachakaQueries
 from .camera import CameraStreamer
+from .controller import RobotController
 
-__all__ = ["KachakaConnection", "KachakaCommands", "KachakaQueries", "CameraStreamer"]
+__all__ = ["KachakaConnection", "KachakaCommands", "KachakaQueries", "CameraStreamer", "RobotController"]
