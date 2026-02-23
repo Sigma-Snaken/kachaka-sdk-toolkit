@@ -16,6 +16,7 @@ from mcp.server.fastmcp import FastMCP
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.camera import CameraStreamer
 from kachaka_core.connection import KachakaConnection
+from kachaka_core.controller import RobotController
 from kachaka_core.queries import KachakaQueries
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -169,6 +170,110 @@ def undock_shelf(ip: str) -> dict:
 def reset_shelf_pose(ip: str, shelf_name: str) -> dict:
     """Reset the recorded pose of a shelf (by name or ID)."""
     return KachakaCommands(KachakaConnection.get(ip)).reset_shelf_pose(shelf_name)
+
+
+# ── Controller (background state polling) ────────────────────────
+
+_controllers: dict[str, RobotController] = {}
+
+
+def _controller_key(ip: str) -> str:
+    return KachakaConnection._normalise_target(ip)
+
+
+@mcp.tool()
+def start_controller(ip: str) -> dict:
+    """Start a RobotController with background state polling.
+
+    Idempotent — returns the existing controller if already running.
+    The controller continuously reads pose, battery, and command state
+    in a background thread.
+    """
+    key = _controller_key(ip)
+    existing = _controllers.get(key)
+    if existing is not None:
+        return {"ok": True, "message": "controller already running"}
+    conn = KachakaConnection.get(ip)
+    ctrl = RobotController(conn)
+    ctrl.start()
+    _controllers[key] = ctrl
+    return {"ok": True, "message": "controller started"}
+
+
+@mcp.tool()
+def stop_controller(ip: str) -> dict:
+    """Stop and remove the RobotController for this robot."""
+    key = _controller_key(ip)
+    ctrl = _controllers.pop(key, None)
+    if ctrl is None:
+        return {"ok": True, "message": "no controller to stop"}
+    ctrl.stop()
+    return {"ok": True, "message": "controller stopped"}
+
+
+@mcp.tool()
+def get_controller_state(ip: str) -> dict:
+    """Return the full RobotState snapshot from the background controller.
+
+    Includes pose, battery, command state, moving_shelf_id, shelf_dropped.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    s = ctrl.state
+    return {
+        "ok": True,
+        "battery_pct": s.battery_pct,
+        "pose_x": s.pose_x,
+        "pose_y": s.pose_y,
+        "pose_theta": s.pose_theta,
+        "is_command_running": s.is_command_running,
+        "last_updated": s.last_updated,
+        "moving_shelf_id": s.moving_shelf_id,
+        "shelf_dropped": s.shelf_dropped,
+    }
+
+
+@mcp.tool()
+def controller_move_shelf(ip: str, shelf_name: str, location_name: str) -> dict:
+    """Move a shelf to a location via the background controller.
+
+    Uses command_id verification and auto-starts shelf drop monitoring.
+    Requires ``start_controller`` first.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    return ctrl.move_shelf(shelf_name, location_name)
+
+
+@mcp.tool()
+def controller_return_shelf(ip: str, shelf_name: str = "") -> dict:
+    """Return a shelf to its home via the background controller.
+
+    Auto-stops shelf drop monitoring. Requires ``start_controller`` first.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    return ctrl.return_shelf(shelf_name)
+
+
+@mcp.tool()
+def controller_move_to_location(ip: str, location_name: str) -> dict:
+    """Move to a location via the background controller.
+
+    Uses command_id verification and deadline-based retry.
+    Requires ``start_controller`` first.
+    """
+    key = _controller_key(ip)
+    ctrl = _controllers.get(key)
+    if ctrl is None:
+        return {"ok": False, "error": "controller not started"}
+    return ctrl.move_to_location(location_name)
 
 
 # ── Speech ───────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 # kachaka-sdk-toolkit
 
-A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 40 tools for AI-driven robot control, and a Skill reference document for development-time agents.
+A unified SDK wrapper for [Kachaka](https://kachaka.life/) robots, providing a shared core library, an MCP Server with 47 tools for AI-driven robot control, and a Skill reference document for development-time agents.
 
 ## Overview
 
@@ -13,7 +13,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(40 tools, stdio)"]
+        MCP["MCP Server<br/>(47 tools, stdio)"]
         SKILL["Skill .md"]
         APP["Your Script<br/>or App"]
     end
@@ -34,6 +34,7 @@ graph TD
     MCP --> CMD
     MCP --> QRY
     MCP --> DET
+    MCP --> CTRL
     SKILL --> kachaka_core
     APP --> kachaka_core
     CONN --> ERR
@@ -54,7 +55,7 @@ graph TD
 - **Background camera streaming** -- `CameraStreamer` runs a daemon thread for continuous JPEG capture without blocking the main loop. Optional detection overlay draws bounding boxes on frames.
 - **Object detection** -- `ObjectDetector` wraps the on-device detector (person, shelf, charger, door) and can annotate frames with bounding boxes via PIL.
 - **Enriched error messages** -- Failed commands include human-readable error descriptions fetched from the robot firmware.
-- **MCP Server** -- 40 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
+- **MCP Server** -- 47 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
 - **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
@@ -466,7 +467,7 @@ annotated = det.annotate_frame(raw, result["objects"])
 
 ## MCP Server
 
-The MCP Server exposes 40 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
+The MCP Server exposes 47 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
 
 ### Running the Server
 
@@ -534,7 +535,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `rotate` | Rotate in place |
 | `return_home` | Return to charger |
 
-#### Shelf Operations (4 tools)
+#### Shelf Operations (5 tools)
 
 | Tool | Description |
 |------|-------------|
@@ -542,6 +543,7 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 | `return_shelf` | Return shelf to home |
 | `dock_shelf` | Dock held shelf |
 | `undock_shelf` | Undock held shelf |
+| `reset_shelf_pose` | Reset recorded pose of a shelf |
 
 #### Speech (3 tools)
 
@@ -575,6 +577,21 @@ All tools require an `ip` parameter (e.g., `"192.168.1.100"`). Port 26400 is app
 |------|-------------|
 | `get_object_detection` | Detect objects (person, shelf, charger, door) with scores + distances |
 | `capture_with_detection` | Camera capture with detection overlay (bounding boxes) |
+
+#### Controller (6 tools)
+
+The controller tools expose `RobotController` through the MCP server, providing background state polling and command-ID-verified execution for multi-step patrols. They follow the same lifecycle pattern as the camera streaming tools: `start_controller` must be called before any other controller tool.
+
+| Tool | Description |
+|------|-------------|
+| `start_controller` | Start background state polling (idempotent) |
+| `stop_controller` | Stop and remove controller |
+| `get_controller_state` | Full state snapshot (pose, battery, shelf, command) |
+| `controller_move_shelf` | Move shelf via controller (auto-starts shelf monitor) |
+| `controller_return_shelf` | Return shelf via controller (auto-stops shelf monitor) |
+| `controller_move_to_location` | Move to location via controller |
+
+All controller action tools return `{"ok": False, "error": "controller not started"}` when no controller exists for the given IP. The controller must be started first with `start_controller`.
 
 #### Map (2 tools)
 
@@ -675,13 +692,14 @@ pytest tests/test_commands.py::TestRetry
 
 | Module | Tests | Covers |
 |--------|-------|--------|
-| `test_connection.py` | 12 | Pool management, normalisation, ping, resolver |
-| `test_commands.py` | 15 | Movement, shelf ops, speech, retry, cancel, stop, polling |
+| `test_connection.py` | 14 | Pool management, normalisation, ping, resolver |
+| `test_commands.py` | 16 | Movement, shelf ops, speech, retry, cancel, stop, polling |
 | `test_queries.py` | 13 | Status, locations, shelves, camera, map, errors, info |
 | `test_camera.py` | 24 | Lifecycle, front/back capture, stats, errors, callbacks, thread safety |
-| `test_controller.py` | 33 | State polling, command execution, metrics, move/shelf/return, racing conditions |
+| `test_controller.py` | 39 | State polling, command execution, metrics, move/shelf/return, racing conditions |
 | `test_detection.py` | 14 | Detections, capture+detect, annotation, label mapping, error handling |
-| **Total** | **111** | |
+| `test_server_controller.py` | 9 | MCP controller tools: start/stop lifecycle, idempotency, state dict, error handling |
+| **Total** | **129** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -704,7 +722,7 @@ graph LR
 
     subgraph mcp["mcp_server/ — MCP Server layer"]
         M_INIT["__init__.py"]
-        M_SRV["server.py — 40 tools, stdio transport"]
+        M_SRV["server.py — 47 tools, stdio transport"]
     end
 
     subgraph skills["skills/kachaka-sdk/ — Plugin skill"]
@@ -716,13 +734,14 @@ graph LR
         P_JSON["plugin.json"]
     end
 
-    subgraph tests["tests/ — pytest suite (111 tests)"]
+    subgraph tests["tests/ — pytest suite (129 tests)"]
         T_CONN["test_connection.py"]
         T_CMD["test_commands.py"]
         T_QRY["test_queries.py"]
         T_CAM["test_camera.py"]
         T_CTRL["test_controller.py"]
         T_DET["test_detection.py"]
+        T_SCTRL["test_server_controller.py"]
     end
 
     subgraph cli["kachaka_sdk_toolkit/ — Setup CLI"]

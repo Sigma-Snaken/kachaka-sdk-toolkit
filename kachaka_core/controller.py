@@ -15,6 +15,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Callable, Optional
 
 from kachaka_api.generated import kachaka_api_pb2 as pb2
 
@@ -32,6 +33,8 @@ class RobotState:
     pose_theta: float = 0.0
     is_command_running: bool = False
     last_updated: float = 0.0
+    moving_shelf_id: Optional[str] = None
+    shelf_dropped: bool = False
 
 
 @dataclass
@@ -115,16 +118,19 @@ class RobotController:
         slow_interval: float = 30.0,
         retry_delay: float = 1.0,
         poll_interval: float = 1.0,
+        on_shelf_dropped: Optional[Callable[[str], None]] = None,
     ) -> None:
         self._conn = conn
         self._fast_interval = fast_interval
         self._slow_interval = slow_interval
         self._retry_delay = retry_delay
         self._poll_interval = poll_interval
+        self._on_shelf_dropped = on_shelf_dropped
 
         self._state = RobotState()
         self._state_lock = threading.Lock()
         self._metrics = ControllerMetrics()
+        self._monitoring_shelf: bool = False
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -149,6 +155,13 @@ class RobotController:
     def reset_metrics(self) -> None:
         """Clear all collected metrics."""
         self._metrics.reset()
+
+    def reset_shelf_monitor(self) -> None:
+        """Reset the shelf_dropped flag and stop shelf monitoring."""
+        self._monitoring_shelf = False
+        with self._state_lock:
+            self._state.shelf_dropped = False
+            self._state.moving_shelf_id = None
 
     def start(self) -> None:
         """Start the background state polling thread. No-op if already running."""
@@ -196,6 +209,25 @@ class RobotController:
                     self._state.last_updated = now
             except Exception:
                 logger.debug("State poll (fast) error", exc_info=True)
+
+            # Shelf monitoring (fast cycle, only when active)
+            if self._monitoring_shelf:
+                try:
+                    shelf_id = sdk.get_moving_shelf_id() or ""
+                    dropped_id = None
+                    with self._state_lock:
+                        prev = self._state.moving_shelf_id
+                        self._state.moving_shelf_id = shelf_id or None
+                        if prev and not shelf_id:
+                            self._state.shelf_dropped = True
+                            dropped_id = prev
+                    if dropped_id:
+                        logger.warning("Shelf dropped: %s", dropped_id)
+                        if self._on_shelf_dropped:
+                            self._on_shelf_dropped(dropped_id)
+                        self._monitoring_shelf = False
+                except Exception:
+                    logger.debug("State poll (shelf monitor) error", exc_info=True)
 
             # Slow cycle: battery
             if now - last_slow >= self._slow_interval:
@@ -455,7 +487,7 @@ class RobotController:
                 destination_location_id=location_id,
             )
         )
-        return self._execute_command(
+        result = self._execute_command(
             cmd,
             "move_shelf",
             f"{shelf_name} -> {location_name}",
@@ -464,6 +496,11 @@ class RobotController:
             tts_on_success=tts_on_success,
             title=title,
         )
+        if result["ok"]:
+            with self._state_lock:
+                self._state.shelf_dropped = False
+            self._monitoring_shelf = True
+        return result
 
     def return_shelf(
         self,
@@ -484,7 +521,7 @@ class RobotController:
                 target_shelf_id=shelf_id
             )
         )
-        return self._execute_command(
+        result = self._execute_command(
             cmd,
             "return_shelf",
             shelf_name,
@@ -493,3 +530,5 @@ class RobotController:
             tts_on_success=tts_on_success,
             title=title,
         )
+        self._monitoring_shelf = False
+        return result
