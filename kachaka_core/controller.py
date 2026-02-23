@@ -210,25 +210,6 @@ class RobotController:
             except Exception:
                 logger.debug("State poll (fast) error", exc_info=True)
 
-            # Shelf monitoring (fast cycle, only when active)
-            if self._monitoring_shelf:
-                try:
-                    shelf_id = sdk.get_moving_shelf_id() or ""
-                    dropped_id = None
-                    with self._state_lock:
-                        prev = self._state.moving_shelf_id
-                        self._state.moving_shelf_id = shelf_id or None
-                        if prev and not shelf_id:
-                            self._state.shelf_dropped = True
-                            dropped_id = prev
-                    if dropped_id:
-                        logger.warning("Shelf dropped: %s", dropped_id)
-                        if self._on_shelf_dropped:
-                            self._on_shelf_dropped(dropped_id)
-                        self._monitoring_shelf = False
-                except Exception:
-                    logger.debug("State poll (shelf monitor) error", exc_info=True)
-
             # Slow cycle: battery
             if now - last_slow >= self._slow_interval:
                 try:
@@ -355,6 +336,23 @@ class RobotController:
                 self._metrics.poll_failure_count += 1
                 time.sleep(self._poll_interval)
                 continue
+
+            # Shelf monitoring — detect drops during command execution
+            if self._monitoring_shelf:
+                try:
+                    mid = self._conn.client.get_moving_shelf_id() or ""
+                    with self._state_lock:
+                        prev = self._state.moving_shelf_id
+                        self._state.moving_shelf_id = mid or None
+                        logger.info("Shelf monitor: prev=%s, now=%s", prev, mid or None)
+                        if prev and not mid:
+                            self._state.shelf_dropped = True
+                            logger.warning("Shelf dropped during command: %s", prev)
+                            if self._on_shelf_dropped:
+                                self._on_shelf_dropped(prev)
+                            self._monitoring_shelf = False
+                except Exception:
+                    logger.debug("Shelf monitor poll error", exc_info=True)
 
             # Check result when: state left RUNNING/PENDING, OR
             # a different command replaced ours (command_id changed).
@@ -487,7 +485,15 @@ class RobotController:
                 destination_location_id=location_id,
             )
         )
-        result = self._execute_command(
+        # Start shelf monitoring BEFORE the command so drops during
+        # transit are detected by the polling loop in _execute_command.
+        # Seed moving_shelf_id so even if the first poll sees it gone,
+        # the prev→empty transition triggers shelf_dropped.
+        with self._state_lock:
+            self._state.shelf_dropped = False
+            self._state.moving_shelf_id = shelf_id
+        self._monitoring_shelf = True
+        return self._execute_command(
             cmd,
             "move_shelf",
             f"{shelf_name} -> {location_name}",
@@ -496,11 +502,6 @@ class RobotController:
             tts_on_success=tts_on_success,
             title=title,
         )
-        if result["ok"]:
-            with self._state_lock:
-                self._state.shelf_dropped = False
-            self._monitoring_shelf = True
-        return result
 
     def return_shelf(
         self,

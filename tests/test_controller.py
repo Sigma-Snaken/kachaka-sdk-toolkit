@@ -986,6 +986,13 @@ class TestShelfMonitor:
     def teardown_method(self):
         KachakaConnection.clear_pool()
 
+    @staticmethod
+    def _cmd_state_resp(state, command_id):
+        resp = MagicMock()
+        resp.state = state
+        resp.command_id = command_id
+        return resp
+
     def _make_ctrl_immediate_success(self, command_id="cmd-shelf", **kwargs):
         """Create a controller where any command succeeds immediately."""
         mock_client = MagicMock()
@@ -1016,8 +1023,9 @@ class TestShelfMonitor:
         )
         return ctrl, mock_client
 
-    def test_shelf_monitoring_starts_after_move_shelf(self):
-        ctrl, _ = self._make_ctrl_immediate_success()
+    def test_shelf_monitoring_starts_before_command(self):
+        """Monitoring activates before _execute_command so drops during transit are caught."""
+        ctrl, mock_client = self._make_ctrl_immediate_success()
         assert ctrl._monitoring_shelf is False
 
         with patch("kachaka_core.controller.time.sleep"):
@@ -1037,61 +1045,127 @@ class TestShelfMonitor:
         assert result["ok"] is True
         assert ctrl._monitoring_shelf is False
 
-    def test_shelf_drop_detected(self):
-        """Shelf goes from attached (S01) to detached ("") → shelf_dropped=True."""
-        conn, mock_client = _make_mock_conn()
-        ctrl = RobotController(conn, fast_interval=0.05, slow_interval=60)
+    def test_shelf_drop_detected_during_command(self):
+        """Shelf drop during _execute_command polling sets shelf_dropped=True."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
 
-        # Start monitoring and seed the initial shelf state
-        ctrl._monitoring_shelf = True
-        ctrl._state.moving_shelf_id = "S01"
+        stub.StartCommand.return_value = self._make_ctrl_immediate_success()[1].stub.StartCommand.return_value
 
-        # get_moving_shelf_id returns "S01" once, then "" (dropped)
+        # Build a controller manually for fine-grained control
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        conn._resolver_ready = True
+        conn.resolve_shelf = MagicMock(return_value="shelf-id")
+        conn.resolve_location = MagicMock(return_value="loc-id")
+
+        start_resp = MagicMock()
+        start_resp.result.success = True
+        start_resp.command_id = "cmd-drop"
+        stub.StartCommand.return_value = start_resp
+
+        # Poll: RUNNING, RUNNING (shelf drops here), then done
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_resp(2, "cmd-drop"),  # registered
+            self._cmd_state_resp(2, "cmd-drop"),  # running, shelf present
+            self._cmd_state_resp(2, "cmd-drop"),  # running, shelf dropped
+            self._cmd_state_resp(0, "cmd-drop"),  # done
+        ]
+
+        result_resp = MagicMock()
+        result_resp.command_id = "cmd-drop"
+        result_resp.result.success = True
+        result_resp.result.error_code = 0
+        stub.GetLastCommandResult.return_value = result_resp
+
+        # get_moving_shelf_id: present, present, then gone (dropped)
         mock_client.get_moving_shelf_id = MagicMock(
-            side_effect=["S01", "", ""]
+            side_effect=["shelf-id", "shelf-id", "", ""]
         )
 
-        ctrl.start()
-        time.sleep(0.3)  # let state loop run a few cycles
-        ctrl.stop()
+        ctrl = RobotController(conn, fast_interval=60, slow_interval=60, poll_interval=0.01)
 
-        state = ctrl.state
-        assert state.shelf_dropped is True
-        assert state.moving_shelf_id is None
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_shelf("ShelfA", "Room1", timeout=10)
+
+        assert result["ok"] is True
+        assert ctrl.state.shelf_dropped is True
+        assert ctrl.state.moving_shelf_id is None
         assert ctrl._monitoring_shelf is False
 
-    def test_shelf_drop_callback_called(self):
-        """on_shelf_dropped callback fires with the dropped shelf_id."""
+    def test_shelf_drop_callback_during_command(self):
+        """on_shelf_dropped callback fires during _execute_command polling."""
         callback = MagicMock()
-        conn, mock_client = _make_mock_conn()
-        ctrl = RobotController(
-            conn, fast_interval=0.05, slow_interval=60, on_shelf_dropped=callback
-        )
+        mock_client = MagicMock()
+        stub = mock_client.stub
 
-        ctrl._monitoring_shelf = True
-        ctrl._state.moving_shelf_id = "S01"
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        conn._resolver_ready = True
+        conn.resolve_shelf = MagicMock(return_value="shelf-id")
+        conn.resolve_location = MagicMock(return_value="loc-id")
 
+        start_resp = MagicMock()
+        start_resp.result.success = True
+        start_resp.command_id = "cmd-cb"
+        stub.StartCommand.return_value = start_resp
+
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_resp(2, "cmd-cb"),  # registered
+            self._cmd_state_resp(2, "cmd-cb"),  # running
+            self._cmd_state_resp(0, "cmd-cb"),  # done
+        ]
+
+        result_resp = MagicMock()
+        result_resp.command_id = "cmd-cb"
+        result_resp.result.success = True
+        result_resp.result.error_code = 0
+        stub.GetLastCommandResult.return_value = result_resp
+
+        # Shelf present first poll, gone second poll
         mock_client.get_moving_shelf_id = MagicMock(
-            side_effect=["S01", "", ""]
+            side_effect=["shelf-id", "", ""]
         )
 
-        ctrl.start()
-        time.sleep(0.3)
-        ctrl.stop()
+        ctrl = RobotController(
+            conn, fast_interval=60, slow_interval=60, poll_interval=0.01,
+            on_shelf_dropped=callback,
+        )
 
-        callback.assert_called_once_with("S01")
+        with patch("kachaka_core.controller.time.sleep"):
+            ctrl.move_shelf("ShelfA", "Room1", timeout=10)
+
+        callback.assert_called_once_with("shelf-id")
 
     def test_no_shelf_poll_when_not_monitoring(self):
-        """get_moving_shelf_id should not be called when monitoring is off."""
-        conn, mock_client = _make_mock_conn()
+        """get_moving_shelf_id not called for non-shelf commands."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+
+        start_resp = MagicMock()
+        start_resp.result.success = True
+        start_resp.command_id = "cmd-home"
+        stub.StartCommand.return_value = start_resp
+
+        cmd_state = MagicMock()
+        cmd_state.state = 0
+        cmd_state.command_id = "cmd-home"
+        stub.GetCommandState.return_value = cmd_state
+
+        result_resp = MagicMock()
+        result_resp.command_id = "cmd-home"
+        result_resp.result.success = True
+        result_resp.result.error_code = 0
+        stub.GetLastCommandResult.return_value = result_resp
+
         mock_client.get_moving_shelf_id = MagicMock(return_value="")
-        ctrl = RobotController(conn, fast_interval=0.05, slow_interval=60)
+        ctrl = RobotController(conn, fast_interval=60, slow_interval=60, poll_interval=0.01)
 
-        assert ctrl._monitoring_shelf is False
-
-        ctrl.start()
-        time.sleep(0.2)
-        ctrl.stop()
+        with patch("kachaka_core.controller.time.sleep"):
+            ctrl.return_home(timeout=10)
 
         mock_client.get_moving_shelf_id.assert_not_called()
 
