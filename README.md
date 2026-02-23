@@ -65,7 +65,7 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 - **Name + ID resolver** -- Commands accept location/shelf names or IDs interchangeably. The resolver patches the upstream SDK to support both.
 - **Background camera streaming** -- `CameraStreamer` runs a daemon thread for continuous JPEG capture without blocking the main loop.
 - **MCP Server** -- 38 tools exposing the full API surface to Claude Desktop, Claude Code, or any MCP client.
-- **Skill document** -- A self-contained reference (`skill/SKILL.md`) for development-time LLM agents.
+- **Skill document** -- A self-contained reference (`skills/kachaka-sdk/SKILL.md`) for development-time LLM agents.
 
 ## Tech Stack
 
@@ -89,6 +89,17 @@ The project follows a layered architecture: a core library (`kachaka_core`) hand
 - A Kachaka robot accessible on the network (default gRPC port: 26400)
 
 ### Installation
+
+#### Option A: Claude Code Plugin (recommended)
+
+```bash
+/plugin marketplace add Sigma-Snaken/kachaka-marketplace
+/plugin install kachaka
+```
+
+This installs the MCP server and skill automatically via `uvx` -- no local clone needed.
+
+#### Option B: Local Development
 
 ```bash
 git clone https://github.com/Sigma-Snaken/kachaka-sdk-toolkit.git
@@ -268,11 +279,11 @@ The MCP Server exposes 38 tools for controlling Kachaka robots through any MCP-c
 ### Running the Server
 
 ```bash
-# stdio transport (default for Claude Desktop / Claude Code)
-python -m mcp_server.server
+# Console entry point (preferred)
+kachaka-mcp
 
-# Or directly
-python mcp_server/server.py
+# Or via module
+python -m mcp_server.server
 ```
 
 ### Claude Desktop Configuration
@@ -490,10 +501,16 @@ kachaka-sdk-toolkit/
 |   |-- __init__.py
 |   +-- server.py              # 38 tools wrapping kachaka_core (stdio transport)
 |
-|-- skill/                     # Skill document for LLM agents
-|   |-- SKILL.md               # Full API reference + anti-patterns
-|   +-- examples/
-|       +-- typical_usage.py   # Patrol script example
+|-- skills/                    # Plugin skills (auto-discovered by Claude Code)
+|   +-- kachaka-sdk/           # Skill document for LLM agents
+|       |-- SKILL.md           # Full API reference + anti-patterns
+|       +-- examples/
+|           +-- typical_usage.py  # Patrol script example
+|
+|-- .claude-plugin/            # Claude Code plugin metadata
+|   +-- plugin.json
+|
+|-- .mcp.json                  # MCP server config for plugin installs
 |
 |-- tests/                     # pytest test suite (no live robot needed)
 |   |-- __init__.py
@@ -526,7 +543,7 @@ kachaka-sdk-toolkit/
 
 1. Implement in `kachaka_core/commands.py` (actions) or `kachaka_core/queries.py` (read-only)
 2. Add a corresponding `@mcp.tool()` in `mcp_server/server.py`
-3. Update `skill/SKILL.md`
+3. Update `skills/kachaka-sdk/SKILL.md`
 4. Add tests in `tests/`
 
 Example:

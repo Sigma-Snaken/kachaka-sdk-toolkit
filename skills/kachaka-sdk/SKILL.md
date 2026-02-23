@@ -1,3 +1,8 @@
+---
+name: kachaka-sdk
+description: Use when tasks involve Kachaka robot control, status queries, connection management, or patrol scripting
+---
+
 # Kachaka Robot SDK Skill
 
 ## When to Use

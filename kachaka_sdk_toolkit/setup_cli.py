@@ -19,7 +19,7 @@ from pathlib import Path
 
 MCP_SERVER_NAME = "kachaka"
 SKILL_LINK_NAME = "kachaka-sdk"
-SKILL_DIR = Path(__file__).resolve().parent.parent / "skill"
+SKILL_DIR = Path(__file__).resolve().parent.parent / "skills" / "kachaka-sdk"
 CLAUDE_SKILLS_DIR = Path.home() / ".claude" / "skills"
 
 
@@ -46,11 +46,10 @@ def _run_claude(*args: str) -> subprocess.CompletedProcess[str]:
 
 def _install_mcp() -> bool:
     """Register the MCP server with Claude Code. Returns True on success/skip."""
-    python = sys.executable
     result = _run_claude(
         "mcp", "add", MCP_SERVER_NAME,
         "--scope", "user",
-        "--", python, "-m", "mcp_server.server",
+        "--", "kachaka-mcp",
     )
     if result.returncode != 0:
         if "already exists" in (result.stderr or "").lower():

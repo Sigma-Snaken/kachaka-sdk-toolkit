@@ -1,7 +1,8 @@
 """MCP Server for Kachaka Robot — thin wrapper around kachaka_core.
 
 Each tool is a one-liner delegation to the shared core layer.
-Run with: ``python -m mcp_server.server`` or ``python mcp_server/server.py``
+Run with: ``kachaka-mcp``, ``python -m mcp_server.server``,
+or ``python mcp_server/server.py``
 
 Transport: stdio (default for Claude Desktop / Claude Code).
 """
@@ -334,5 +335,11 @@ def emergency_stop(ip: str) -> dict:
 
 # ── Entry point ──────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+
+def main():
+    """Console entry point for ``kachaka-mcp`` command."""
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

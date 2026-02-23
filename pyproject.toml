@@ -14,6 +14,7 @@ dev = ["pytest", "pytest-mock"]
 
 [project.scripts]
 kachaka-setup = "kachaka_sdk_toolkit.setup_cli:main"
+kachaka-mcp = "mcp_server.server:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]
