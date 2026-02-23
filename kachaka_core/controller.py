@@ -204,3 +204,266 @@ class RobotController:
                     logger.debug("State poll (slow/battery) error", exc_info=True)
 
             self._stop_event.wait(self._fast_interval)
+
+    # ── Command execution engine ──────────────────────────────
+
+    def _execute_command(
+        self,
+        command: pb2.Command,
+        action: str,
+        target: str = "",
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Send a command to the robot and poll until completion or timeout.
+
+        Returns a standardised result dict:
+            {"ok": True,  "action": ..., "target": ..., "elapsed": ...}
+            {"ok": False, "action": ..., "error_code": ..., "error": ..., "elapsed": ...}
+            {"ok": False, "action": ..., "target": ..., "error": "TIMEOUT", "timeout": ...}
+        """
+        stub = self._conn.client.stub
+        deadline = time.perf_counter() + timeout
+        t0 = time.perf_counter()
+
+        # 1. Start the command (with retry until deadline)
+        request = pb2.StartCommandRequest(
+            command=command,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+        try:
+            start_resp = _call_with_retry(
+                stub.StartCommand,
+                request,
+                deadline=deadline,
+                retry_delay=self._retry_delay,
+            )
+        except Exception as exc:
+            elapsed = time.perf_counter() - t0
+            return {
+                "ok": False,
+                "action": action,
+                "target": target,
+                "error": str(exc),
+                "elapsed": elapsed,
+            }
+
+        command_id = start_resp.command_id
+
+        # 2. If the robot rejected the command immediately, return error
+        if not start_resp.result.success:
+            elapsed = time.perf_counter() - t0
+            return {
+                "ok": False,
+                "action": action,
+                "error_code": start_resp.result.error_code,
+                "error": f"error_code={start_resp.result.error_code}",
+                "elapsed": elapsed,
+            }
+
+        # 3. Wait for the command to register (poll GetCommandState, max 5s, 0.2s)
+        reg_deadline = min(time.perf_counter() + 5.0, deadline)
+        while time.perf_counter() < reg_deadline:
+            try:
+                state_resp = stub.GetCommandState(pb2.GetRequest())
+                if (
+                    state_resp.command_id == command_id
+                    and state_resp.state
+                    in (
+                        pb2.COMMAND_STATE_RUNNING,
+                        pb2.COMMAND_STATE_PENDING,
+                    )
+                ):
+                    break
+            except Exception:
+                pass
+            time.sleep(0.2)
+
+        # 4. Main polling loop
+        while time.perf_counter() < deadline:
+            self._metrics.poll_count += 1
+            poll_t0 = time.perf_counter()
+
+            try:
+                state_resp = stub.GetCommandState(pb2.GetRequest())
+                rtt = (time.perf_counter() - poll_t0) * 1000  # ms
+                self._metrics.poll_rtt_list.append(rtt)
+                self._metrics.poll_success_count += 1
+            except Exception:
+                self._metrics.poll_failure_count += 1
+                time.sleep(self._poll_interval)
+                continue
+
+            # If the command is no longer running, check the result
+            if state_resp.state not in (
+                pb2.COMMAND_STATE_RUNNING,
+                pb2.COMMAND_STATE_PENDING,
+            ):
+                try:
+                    result_resp = _call_with_retry(
+                        stub.GetLastCommandResult,
+                        pb2.GetRequest(),
+                        deadline=deadline,
+                        retry_delay=self._retry_delay,
+                    )
+                except Exception as exc:
+                    elapsed = time.perf_counter() - t0
+                    return {
+                        "ok": False,
+                        "action": action,
+                        "target": target,
+                        "error": str(exc),
+                        "elapsed": elapsed,
+                    }
+
+                # Verify this result is for OUR command
+                if result_resp.command_id == command_id:
+                    elapsed = time.perf_counter() - t0
+                    if result_resp.result.success:
+                        return {
+                            "ok": True,
+                            "action": action,
+                            "target": target,
+                            "elapsed": elapsed,
+                        }
+                    else:
+                        return {
+                            "ok": False,
+                            "action": action,
+                            "error_code": result_resp.result.error_code,
+                            "error": f"error_code={result_resp.result.error_code}",
+                            "elapsed": elapsed,
+                        }
+                # command_id mismatch — our command might still be pending,
+                # keep polling
+
+            time.sleep(self._poll_interval)
+
+        # 5. Timeout
+        return {
+            "ok": False,
+            "action": action,
+            "target": target,
+            "error": "TIMEOUT",
+            "timeout": timeout,
+        }
+
+    # ── Movement commands ─────────────────────────────────────
+
+    def move_to_location(
+        self,
+        location_name: str,
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move the robot to a named location."""
+        self._conn.ensure_resolver()
+        location_id = self._conn.client.resolver.resolve_location_id_or_name(
+            location_name
+        )
+        cmd = pb2.Command(
+            move_to_location_command=pb2.MoveToLocationCommand(
+                target_location_id=location_id
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "move_to_location",
+            location_name,
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+
+    def return_home(
+        self,
+        *,
+        timeout: float = 60.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move the robot to its home (charger) location."""
+        cmd = pb2.Command(return_home_command=pb2.ReturnHomeCommand())
+        return self._execute_command(
+            cmd,
+            "return_home",
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+
+    def move_shelf(
+        self,
+        shelf_name: str,
+        location_name: str,
+        *,
+        timeout: float = 120.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move a shelf to a named location."""
+        self._conn.ensure_resolver()
+        shelf_id = self._conn.client.resolver.resolve_shelf_id_or_name(
+            shelf_name
+        )
+        location_id = self._conn.client.resolver.resolve_location_id_or_name(
+            location_name
+        )
+        cmd = pb2.Command(
+            move_shelf_command=pb2.MoveShelfCommand(
+                target_shelf_id=shelf_id,
+                destination_location_id=location_id,
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "move_shelf",
+            f"{shelf_name} -> {location_name}",
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+
+    def return_shelf(
+        self,
+        shelf_name: str = "",
+        *,
+        timeout: float = 60.0,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Return a shelf to its home location."""
+        shelf_id = ""
+        if shelf_name:
+            self._conn.ensure_resolver()
+            shelf_id = self._conn.client.resolver.resolve_shelf_id_or_name(
+                shelf_name
+            )
+        cmd = pb2.Command(
+            return_shelf_command=pb2.ReturnShelfCommand(
+                target_shelf_id=shelf_id
+            )
+        )
+        return self._execute_command(
+            cmd,
+            "return_shelf",
+            shelf_name,
+            timeout=timeout,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )

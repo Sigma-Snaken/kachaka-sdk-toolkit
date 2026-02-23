@@ -173,3 +173,182 @@ class TestRobotControllerLifecycle:
         state = ctrl.state
         assert state.battery_pct == 85
         ctrl.stop()
+
+
+# ── _execute_command and movement command tests ──────────────────
+
+
+class TestExecuteCommand:
+    """Tests for _execute_command engine and movement command wrappers."""
+
+    def setup_method(self):
+        KachakaConnection.clear_pool()
+
+    def teardown_method(self):
+        KachakaConnection.clear_pool()
+
+    def _make_ctrl(self, mock_client):
+        """Create a RobotController with custom mock client.
+
+        Uses high intervals (60s) so the state polling thread never
+        interferes with tests.  The controller is NOT started — command
+        execution doesn't require the state thread.
+        """
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client  # Override with our custom mock
+        ctrl = RobotController(
+            conn, fast_interval=60, slow_interval=60, poll_interval=0.05
+        )
+        return ctrl
+
+    # ── helpers for building mock stub responses ─────────────
+
+    @staticmethod
+    def _start_cmd_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _cmd_state_response(state, command_id="cmd-abc"):
+        resp = MagicMock()
+        resp.state = state
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _last_result_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    # ── test_command_success ─────────────────────────────────
+
+    def test_command_success(self):
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        # StartCommand → success, command_id="cmd-abc"
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-abc"
+        )
+
+        # GetCommandState: RUNNING first, then UNSPECIFIED (command done)
+        stub.GetCommandState.side_effect = [
+            # registration poll(s)
+            self._cmd_state_response(2, "cmd-abc"),  # RUNNING → registered
+            # main poll: still RUNNING
+            self._cmd_state_response(2, "cmd-abc"),
+            # main poll: no longer RUNNING (UNSPECIFIED = 0)
+            self._cmd_state_response(0, "cmd-abc"),
+        ]
+
+        # GetLastCommandResult → success, matching command_id
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-abc"
+        )
+
+        # Resolver for move_to_location
+        mock_client.resolver.resolve_location_id_or_name.return_value = "loc-123"
+
+        ctrl = self._make_ctrl(mock_client)
+        # ensure_resolver is on the connection
+        ctrl._conn._resolver_ready = True
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_to_location("Kitchen", timeout=10.0)
+
+        assert result["ok"] is True
+        assert result["action"] == "move_to_location"
+        assert "elapsed" in result
+
+    # ── test_command_start_failure ────────────────────────────
+
+    def test_command_start_failure(self):
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=False, command_id="", error_code=13
+        )
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is False
+        assert result["error_code"] == 13
+
+    # ── test_command_timeout ─────────────────────────────────
+
+    def test_command_timeout(self):
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-timeout"
+        )
+
+        # Always return RUNNING so the command never finishes
+        stub.GetCommandState.return_value = self._cmd_state_response(
+            2, "cmd-timeout"  # COMMAND_STATE_RUNNING = 2
+        )
+
+        ctrl = self._make_ctrl(mock_client)
+
+        # Use a very short timeout so the test completes quickly
+        # We patch time.sleep to avoid real waits, but perf_counter
+        # advances naturally through the loop overhead... so we patch it.
+        call_count = 0
+        base_time = time.perf_counter()
+
+        def fake_perf_counter():
+            nonlocal call_count
+            call_count += 1
+            # After a few calls, jump past the deadline
+            if call_count > 10:
+                return base_time + 100.0  # way past any deadline
+            return base_time + call_count * 0.01
+
+        with patch("kachaka_core.controller.time.sleep"):
+            with patch("kachaka_core.controller.time.perf_counter", side_effect=fake_perf_counter):
+                result = ctrl.return_home(timeout=0.5)
+
+        assert result["ok"] is False
+        assert result["error"] == "TIMEOUT"
+
+    # ── test_metrics_recorded ────────────────────────────────
+
+    def test_metrics_recorded(self):
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-met"
+        )
+
+        # Registration poll: RUNNING (registered)
+        # Main poll: RUNNING, then UNSPECIFIED
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-met"),   # registered
+            self._cmd_state_response(2, "cmd-met"),   # still running
+            self._cmd_state_response(0, "cmd-met"),   # done
+        ]
+
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-met"
+        )
+
+        ctrl = self._make_ctrl(mock_client)
+        ctrl.reset_metrics()
+
+        with patch("kachaka_core.controller.time.sleep"):
+            ctrl.return_home(timeout=10.0)
+
+        assert ctrl.metrics.poll_count >= 1
+        assert ctrl.metrics.poll_success_count >= 1
