@@ -344,7 +344,6 @@ class RobotController:
                     with self._state_lock:
                         prev = self._state.moving_shelf_id
                         self._state.moving_shelf_id = mid or None
-                        logger.info("Shelf monitor: prev=%s, now=%s", prev, mid or None)
                         if prev and not mid:
                             self._state.shelf_dropped = True
                             logger.warning("Shelf dropped during command: %s", prev)
