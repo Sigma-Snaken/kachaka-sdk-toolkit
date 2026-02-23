@@ -165,6 +165,12 @@ def undock_shelf(ip: str) -> dict:
     return KachakaCommands(KachakaConnection.get(ip)).undock_shelf()
 
 
+@mcp.tool()
+def reset_shelf_pose(ip: str, shelf_name: str) -> dict:
+    """Reset the recorded pose of a shelf (by name or ID)."""
+    return KachakaCommands(KachakaConnection.get(ip)).reset_shelf_pose(shelf_name)
+
+
 # ── Speech ───────────────────────────────────────────────────────────
 
 @mcp.tool()

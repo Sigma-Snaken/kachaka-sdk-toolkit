@@ -148,6 +148,14 @@ class KachakaCommands:
         result = self.sdk.undock_shelf(**kwargs)
         return self._result_to_dict(result, action="undock_shelf")
 
+    @with_retry()
+    def reset_shelf_pose(self, shelf_name: str) -> dict:
+        """Reset the recorded pose of a shelf."""
+        self.conn.ensure_resolver()
+        shelf_id = self.sdk.resolver.get_shelf_id_by_name(shelf_name)
+        result = self.sdk.reset_shelf_pose(shelf_id)
+        return self._result_to_dict(result, action="reset_shelf_pose", target=shelf_name)
+
     # ── Speech ───────────────────────────────────────────────────────
 
     @with_retry()

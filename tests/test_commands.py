@@ -101,6 +101,15 @@ class TestShelfOps:
         result = KachakaCommands(conn).dock_shelf()
         assert result["ok"] is True
 
+    def test_reset_shelf_pose(self):
+        mock_client = MagicMock()
+        mock_client.reset_shelf_pose.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).reset_shelf_pose("Shelf A")
+        assert result["ok"] is True
+        assert result["target"] == "Shelf A"
+
 
 class TestSpeech:
     def test_speak(self):
