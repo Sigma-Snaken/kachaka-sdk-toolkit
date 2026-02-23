@@ -139,7 +139,11 @@ class RobotController:
 
     @property
     def metrics(self) -> ControllerMetrics:
-        """Return reference to the metrics object."""
+        """Return reference to the metrics object.
+
+        Not a snapshot — read after command execution completes,
+        not concurrently from another thread.
+        """
         return self._metrics
 
     def reset_metrics(self) -> None:

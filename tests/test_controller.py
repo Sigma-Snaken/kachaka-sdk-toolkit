@@ -353,6 +353,72 @@ class TestExecuteCommand:
         assert ctrl.metrics.poll_count >= 1
         assert ctrl.metrics.poll_success_count >= 1
 
+    # ── test_poll_survives_grpc_error ────────────────────────
+
+    def test_poll_survives_grpc_error(self):
+        """gRPC failure during main poll loop records failure and recovers."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-err"
+        )
+
+        # Registration: RUNNING
+        # Main poll: gRPC error, then RUNNING, then UNSPECIFIED (done)
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-err"),   # registered
+            Exception("network blip"),                  # poll failure
+            self._cmd_state_response(2, "cmd-err"),    # still running
+            self._cmd_state_response(0, "cmd-err"),    # done
+        ]
+
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-err"
+        )
+
+        ctrl = self._make_ctrl(mock_client)
+        ctrl.reset_metrics()
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is True
+        assert ctrl.metrics.poll_failure_count >= 1
+        assert ctrl.metrics.poll_success_count >= 1
+
+    # ── test_command_id_mismatch_recovery ─────────────────────
+
+    def test_command_id_mismatch_recovery(self):
+        """GetLastCommandResult returns wrong command_id, then correct one."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-ours"
+        )
+
+        # Registration: RUNNING
+        # Main poll: UNSPECIFIED (done), then UNSPECIFIED again after mismatch
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-ours"),   # registered
+            self._cmd_state_response(0, "cmd-ours"),   # done — but result is stale
+            self._cmd_state_response(0, "cmd-ours"),   # done — result now correct
+        ]
+
+        # First call returns old command's result, second returns ours
+        stub.GetLastCommandResult.side_effect = [
+            self._last_result_response(success=True, command_id="cmd-old"),
+            self._last_result_response(success=True, command_id="cmd-ours"),
+        ]
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is True
+
 
 class TestOtherMovementCommands:
     """Verify each movement wrapper builds the correct protobuf command."""
