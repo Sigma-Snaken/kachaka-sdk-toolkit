@@ -337,6 +337,89 @@ ctrl = RobotController(
 | Background state monitoring | `RobotController` |
 | Blocking call with `@with_retry` | `KachakaCommands` |
 
+### Command Execution Flow
+
+The following sequence diagram shows the full `_execute_command` internal flow, which
+underlies every high-level command method (`move_to_location`, `return_home`,
+`move_shelf`, `return_shelf`).
+
+```mermaid
+sequenceDiagram
+    participant Controller
+    participant Robot
+
+    rect rgb(230, 245, 255)
+        Note over Controller, Robot: Phase 1 — StartCommand (with retry until deadline)
+        loop Retry until deadline (retry_delay between attempts)
+            Controller->>Robot: StartCommand(request)
+            alt gRPC success
+                Robot-->>Controller: command_id + result
+            else gRPC failure
+                Note right of Controller: Wait retry_delay, then retry
+            end
+        end
+        alt result.success == false
+            Controller->>Controller: get_robot_error_code(result)
+            Note right of Controller: Return error immediately<br/>(no polling needed)
+        end
+    end
+
+    rect rgb(255, 245, 230)
+        Note over Controller, Robot: Phase 2 — Registration Poll (max 5s, 0.2s interval)
+        loop Every 0.2s for up to 5 seconds
+            Controller->>Robot: GetCommandState()
+            Robot-->>Controller: state (command_id, state)
+            alt Our command_id with state RUNNING or PENDING
+                Note right of Controller: Registration confirmed, proceed
+            else Not yet registered
+                Note right of Controller: Continue polling
+            end
+        end
+        Note over Controller: If 5s pass without confirmation:<br/>log warning but continue anyway
+    end
+
+    rect rgb(230, 255, 230)
+        Note over Controller, Robot: Phase 3 — Main Polling Loop (until deadline)
+        loop Every poll_interval (default 1s) until deadline
+            Controller->>Robot: GetCommandState()
+            Note right of Controller: Measure RTT for metrics
+            Robot-->>Controller: state (command_id, state)
+            alt State leaves RUNNING/PENDING OR command_id changes
+                Note over Controller, Robot: Completion detected
+                loop Retry
+                    Controller->>Robot: GetLastCommandResult()
+                    Robot-->>Controller: result (command_id, success, error_code)
+                end
+                alt result.command_id == our_command_id AND success
+                    Note right of Controller: Return ok
+                else result.command_id == our_command_id AND failure
+                    Controller->>Controller: get_robot_error_code(result)
+                    Note right of Controller: Return error with description
+                else result.command_id != our_command_id
+                    Note right of Controller: Mismatch — continue polling<br/>(our command might still be pending)
+                end
+            else Still RUNNING or PENDING
+                Note right of Controller: Continue polling
+            end
+        end
+    end
+
+    rect rgb(255, 230, 230)
+        Note over Controller, Robot: Phase 4 — Timeout
+        Note over Controller: Deadline reached → return TIMEOUT error
+    end
+```
+
+**Racing and concurrency notes:**
+
+- **Command preemption**: If Command B is issued while Command A is still running,
+  the robot cancels A. Command A's polling loop will see a completion with
+  `error_code=10001` (command cancelled). When two callers race, the loser
+  typically gets a `TIMEOUT` because its `command_id` is never reported as the
+  current command.
+- **Not thread-safe**: `_execute_command` is **not** thread-safe. Callers must
+  serialise command execution externally (e.g. with a lock or sequential task queue).
+
 ## ObjectDetector
 
 On-device object detection (person, shelf, charger, door) with optional bounding-box annotation via PIL.
@@ -693,5 +776,7 @@ def my_new_command(ip: str, param: str) -> dict:
 ```
 
 ## License
+
+MIT License. Copyright 2025-present Sigma Robotics.
 
 This project wraps the [kachaka-api](https://github.com/pf-robotics/kachaka-api) SDK. Refer to that project for SDK licensing terms.
