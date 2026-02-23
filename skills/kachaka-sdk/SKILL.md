@@ -275,6 +275,65 @@ streamer.start()
 streamer = CameraStreamer(conn, camera="back")
 ```
 
+### With detection overlay
+
+```python
+streamer = CameraStreamer(conn, interval=1.0, detect=True, annotate=True)
+streamer.start()
+
+# latest_frame now includes "objects" key + bbox drawn on image
+frame = streamer.latest_frame
+# {"ok": True, "image_base64": "...", "objects": [...], "timestamp": ...}
+
+# Detection results separately
+detections = streamer.latest_detections
+# [{"label": "person", "label_id": 1, "roi": {...}, "score": 0.95, "distance": 2.3}, ...]
+```
+
+- `detect=True, annotate=False` — raw frame + detection results (no bbox)
+- `detect=True, annotate=True` — annotated frame + detection results
+- Default `detect=False, annotate=False` — unchanged behavior
+
+## Object Detection
+
+```python
+from kachaka_core.detection import ObjectDetector
+
+det = ObjectDetector(conn)
+
+# Get current detections
+result = det.get_detections()
+# {"ok": True, "objects": [{"label": "person", "label_id": 1,
+#   "roi": {"x": 100, "y": 50, "width": 200, "height": 300},
+#   "score": 0.79, "distance": 2.3}, ...]}
+
+# Capture image + detections together
+result = det.capture_with_detections(camera="front")
+# {"ok": True, "image_base64": "...", "format": "jpeg", "objects": [...]}
+
+# Draw bounding boxes on raw JPEG bytes
+import base64
+raw = base64.b64decode(result["image_base64"])
+annotated = det.annotate_frame(raw, result["objects"])
+# Returns annotated JPEG bytes (not base64)
+```
+
+### Labels
+
+| label_id | label | bbox color |
+|----------|-------|------------|
+| 0 | unknown | pink |
+| 1 | person | green |
+| 2 | shelf | blue |
+| 3 | charger | cyan |
+| 4 | door | red |
+
+### Notes
+
+- `distance` is `None` when `distance_median <= 0` (close range or sensor unavailable)
+- `annotate_frame` uses PIL ImageDraw — does not depend on `kachaka_api.util.vision`
+- Detection failure in CameraStreamer never blocks frame capture (log + skip)
+
 ## Map
 
 ```python
