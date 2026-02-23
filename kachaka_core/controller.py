@@ -220,6 +220,9 @@ class RobotController:
     ) -> dict:
         """Send a command to the robot and poll until completion or timeout.
 
+        Not thread-safe — callers must serialise command execution.
+        (Metrics counters use plain ``+=`` without locking.)
+
         Returns a standardised result dict:
             {"ok": True,  "action": ..., "target": ..., "elapsed": ...}
             {"ok": False, "action": ..., "error_code": ..., "error": ..., "elapsed": ...}
@@ -261,6 +264,7 @@ class RobotController:
             return {
                 "ok": False,
                 "action": action,
+                "target": target,
                 "error_code": start_resp.result.error_code,
                 "error": f"error_code={start_resp.result.error_code}",
                 "elapsed": elapsed,
@@ -283,6 +287,8 @@ class RobotController:
             except Exception:
                 pass
             time.sleep(0.2)
+        else:
+            logger.debug("Command %s registration not confirmed within 5s", command_id)
 
         # 4. Main polling loop
         while time.perf_counter() < deadline:
@@ -335,12 +341,17 @@ class RobotController:
                         return {
                             "ok": False,
                             "action": action,
+                            "target": target,
                             "error_code": result_resp.result.error_code,
                             "error": f"error_code={result_resp.result.error_code}",
                             "elapsed": elapsed,
                         }
-                # command_id mismatch — our command might still be pending,
-                # keep polling
+                # command_id mismatch — our command might still be pending
+                logger.debug(
+                    "command_id mismatch: ours=%s, got=%s — continuing poll",
+                    command_id,
+                    result_resp.command_id,
+                )
 
             time.sleep(self._poll_interval)
 
