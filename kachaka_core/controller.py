@@ -309,10 +309,12 @@ class RobotController:
                 time.sleep(self._poll_interval)
                 continue
 
-            # If the command is no longer running, check the result
-            if state_resp.state not in (
-                pb2.COMMAND_STATE_RUNNING,
-                pb2.COMMAND_STATE_PENDING,
+            # Check result when: state left RUNNING/PENDING, OR
+            # a different command replaced ours (command_id changed).
+            if (
+                state_resp.state
+                not in (pb2.COMMAND_STATE_RUNNING, pb2.COMMAND_STATE_PENDING)
+                or state_resp.command_id != command_id
             ):
                 try:
                     result_resp = _call_with_retry(
