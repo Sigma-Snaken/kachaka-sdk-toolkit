@@ -149,6 +149,69 @@ image = Image.open(io.BytesIO(data))
 image.save("snapshot.jpg")
 ```
 
+## RobotController (Background Polling + Non-blocking Commands)
+
+For long-running movement commands with metrics collection, use `RobotController` instead of `KachakaCommands`. It runs a background thread for continuous state polling and executes commands non-blockingly with `command_id` verification.
+
+**When to use RobotController vs KachakaCommands:**
+- `KachakaCommands`: Simple one-shot commands, blocking calls, `@with_retry` for gRPC errors
+- `RobotController`: Multi-step patrols, metrics collection (RTT, poll counts), background state monitoring, command_id verification
+
+```python
+from kachaka_core import KachakaConnection, RobotController
+
+conn = KachakaConnection.get("192.168.1.100")
+ctrl = RobotController(conn)
+ctrl.start()  # starts background state polling thread
+
+# Thread-safe state snapshot (updated every fast_interval)
+state = ctrl.state
+print(state.battery_pct, state.pose_x, state.pose_y, state.is_command_running)
+
+# Non-blocking command execution with polling + command_id verification
+result = ctrl.move_to_location("Kitchen", timeout=120)
+# {"ok": True, "action": "move_to_location", "target": "Kitchen", "elapsed": 45.2}
+
+result = ctrl.return_home(timeout=60)
+result = ctrl.move_shelf("Shelf A", "Meeting Room", timeout=120)
+result = ctrl.return_shelf("Shelf A", timeout=60)
+
+# Metrics collected during command execution
+m = ctrl.metrics
+print(f"polls={m.poll_count}, avg_rtt={sum(m.poll_rtt_list)/len(m.poll_rtt_list):.1f}ms")
+ctrl.reset_metrics()
+
+ctrl.stop()
+```
+
+### Constructor parameters
+
+```python
+ctrl = RobotController(
+    conn,
+    fast_interval=1.0,   # pose + command_state poll interval (seconds)
+    slow_interval=30.0,   # battery poll interval (seconds)
+    retry_delay=1.0,      # delay between retries on StartCommand failure
+    poll_interval=1.0,    # delay between GetCommandState polls during execution
+)
+```
+
+### How command execution works
+
+1. `StartCommand` with retry until deadline — captures `command_id`
+2. Registration poll (5s max) — waits for `GetCommandState` to report our `command_id`
+3. Main poll loop — polls `GetCommandState` every `poll_interval`
+4. Completion detected when: state leaves RUNNING/PENDING **or** `command_id` changes
+5. `GetLastCommandResult` with `command_id` verification — confirms result is for our command
+
+### Important notes
+
+- `_execute_command` is **not thread-safe** — serialise command calls from the caller side
+- `metrics` is not a snapshot — read after command execution, not concurrently
+- `state` property returns a thread-safe `copy.copy()` snapshot
+- Background thread is a daemon — auto-exits when the process ends
+- Kachaka's `GetCommandState` returns `PENDING` + empty `command_id` after command completion (idle state), so completion is detected via `command_id` change, not state transition alone
+
 ## Camera Streaming (Best Practice)
 
 For continuous monitoring, use `CameraStreamer` instead of calling `get_front_camera_image()` in a loop. This pattern was proven optimal in connection-test Round 1 (30-40% lower RTT, lowest camera drop rates).
@@ -286,6 +349,8 @@ def my_new_command(ip: str, param: str) -> dict:
 | Hard-code robot IP | Pass as parameter or env var |
 | Ignore `result["ok"]` | Always check before proceeding |
 | Call `sdk.move_to_location()` raw | Use `cmds.move_to_location()` which handles resolver |
+| Use `KachakaCommands` for patrol sequences with metrics | Use `RobotController` for background polling + command_id verified execution |
+| Check `GetCommandState` state only for completion | Also check `command_id` change — idle state is PENDING with empty command_id |
 
 ## SDK Reference
 

@@ -272,6 +272,60 @@ streamer = CameraStreamer(conn, camera="back")
 - `start()` on an already-running streamer is a no-op
 - `stop()` on a non-running streamer is a no-op
 
+## RobotController
+
+Background state polling + non-blocking command execution with `command_id` verification. Use for multi-step patrols and metrics collection instead of `KachakaCommands`.
+
+### Basic Usage
+
+```python
+from kachaka_core import KachakaConnection, RobotController
+
+conn = KachakaConnection.get("192.168.1.100")
+ctrl = RobotController(conn)
+ctrl.start()  # starts background state polling thread
+
+# Thread-safe state snapshot (updated every fast_interval)
+state = ctrl.state
+print(state.battery_pct, state.pose_x, state.pose_y, state.is_command_running)
+
+# Non-blocking command execution with polling + command_id verification
+result = ctrl.move_to_location("Kitchen", timeout=120)
+# {"ok": True, "action": "move_to_location", "target": "Kitchen", "elapsed": 45.2}
+
+result = ctrl.return_home(timeout=60)
+result = ctrl.move_shelf("Shelf A", "Meeting Room", timeout=120)
+result = ctrl.return_shelf("Shelf A", timeout=60)
+
+# Metrics collected during command execution
+m = ctrl.metrics
+print(f"polls={m.poll_count}, avg_rtt={sum(m.poll_rtt_list)/len(m.poll_rtt_list):.1f}ms")
+ctrl.reset_metrics()
+
+ctrl.stop()
+```
+
+### Constructor Parameters
+
+```python
+ctrl = RobotController(
+    conn,
+    fast_interval=1.0,   # pose + command_state poll interval (seconds)
+    slow_interval=30.0,   # battery poll interval (seconds)
+    retry_delay=1.0,      # delay between retries on StartCommand failure
+    poll_interval=1.0,    # delay between GetCommandState polls during execution
+)
+```
+
+### When to Use
+
+| Use Case | Recommended |
+|----------|-------------|
+| Simple one-shot command | `KachakaCommands` |
+| Multi-step patrol with metrics | `RobotController` |
+| Background state monitoring | `RobotController` |
+| Blocking call with `@with_retry` | `KachakaCommands` |
+
 ## MCP Server
 
 The MCP Server exposes 38 tools for controlling Kachaka robots through any MCP-compatible client (Claude Desktop, Claude Code, etc.). Each tool is a thin one-liner delegation to `kachaka_core`.
@@ -477,7 +531,8 @@ pytest tests/test_commands.py::TestRetry
 | `test_commands.py` | 15 | Movement, shelf ops, speech, retry, cancel, stop, polling |
 | `test_queries.py` | 13 | Status, locations, shelves, camera, map, errors, info |
 | `test_camera.py` | 24 | Lifecycle, front/back capture, stats, errors, callbacks, thread safety |
-| **Total** | **64** | |
+| `test_controller.py` | 24 | State polling, command execution, metrics, move/shelf/return, edge cases |
+| **Total** | **88** | |
 
 All tests use the `_clean_pool` autouse fixture to ensure isolation between tests.
 
@@ -490,11 +545,12 @@ kachaka-sdk-toolkit/
 |   +-- setup_cli.py           # kachaka-setup command (MCP + Skill registration)
 |
 |-- kachaka_core/              # Shared core library
-|   |-- __init__.py            # Public exports: KachakaConnection, KachakaCommands, KachakaQueries, CameraStreamer
+|   |-- __init__.py            # Public exports: KachakaConnection, KachakaCommands, KachakaQueries, CameraStreamer, RobotController
 |   |-- connection.py          # Thread-safe pooled gRPC connections
 |   |-- commands.py            # Robot action commands (movement, shelf, speech, manual control)
 |   |-- queries.py             # Read-only status queries (pose, battery, camera, map, etc.)
 |   |-- camera.py              # CameraStreamer: background daemon thread capture
+|   |-- controller.py          # RobotController: background state polling + non-blocking commands
 |   +-- error_handling.py      # @with_retry decorator, format_grpc_error
 |
 |-- mcp_server/                # MCP Server layer
@@ -517,6 +573,7 @@ kachaka-sdk-toolkit/
 |   |-- test_connection.py
 |   |-- test_commands.py
 |   |-- test_queries.py
+|   |-- test_controller.py
 |   +-- test_camera.py
 |
 |-- docs/                      # Design documents and plans
