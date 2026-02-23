@@ -352,3 +352,71 @@ class TestExecuteCommand:
 
         assert ctrl.metrics.poll_count >= 1
         assert ctrl.metrics.poll_success_count >= 1
+
+
+class TestOtherMovementCommands:
+    """Verify each movement wrapper builds the correct protobuf command."""
+
+    def setup_method(self):
+        KachakaConnection.clear_pool()
+
+    def teardown_method(self):
+        KachakaConnection.clear_pool()
+
+    def _make_ctrl_immediate_success(self, command_id="cmd-123"):
+        """Create a controller where any command succeeds immediately."""
+        mock_client = MagicMock()
+        mock_client.update_resolver.return_value = None
+        mock_client.resolver.resolve_location_id_or_name.return_value = "loc-id"
+        mock_client.resolver.resolve_shelf_id_or_name.return_value = "shelf-id"
+
+        start_resp = MagicMock()
+        start_resp.result.success = True
+        start_resp.command_id = command_id
+        mock_client.stub.StartCommand.return_value = start_resp
+
+        cmd_state_resp = MagicMock()
+        cmd_state_resp.state = 0  # COMMAND_STATE_UNSPECIFIED (done immediately)
+        cmd_state_resp.command_id = command_id
+        mock_client.stub.GetCommandState.return_value = cmd_state_resp
+
+        result_resp = MagicMock()
+        result_resp.command_id = command_id
+        result_resp.result.success = True
+        result_resp.result.error_code = 0
+        mock_client.stub.GetLastCommandResult.return_value = result_resp
+
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        conn._resolver_ready = True
+        ctrl = RobotController(conn, fast_interval=60, slow_interval=60, poll_interval=0.01)
+        return ctrl, mock_client
+
+    def test_return_home(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "return_home"
+        # Verify pb2.Command has return_home_command
+        call_args = mock_client.stub.StartCommand.call_args[0][0]
+        assert call_args.command.HasField("return_home_command")
+
+    def test_move_shelf(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.move_shelf("ShelfA", "Room1", timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "move_shelf"
+        assert "ShelfA" in result["target"]
+        call_args = mock_client.stub.StartCommand.call_args[0][0]
+        assert call_args.command.HasField("move_shelf_command")
+
+    def test_return_shelf(self):
+        ctrl, mock_client = self._make_ctrl_immediate_success()
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_shelf("ShelfA", timeout=10)
+        assert result["ok"] is True
+        assert result["action"] == "return_shelf"
+        call_args = mock_client.stub.StartCommand.call_args[0][0]
+        assert call_args.command.HasField("return_shelf_command")
