@@ -45,8 +45,9 @@ class KachakaCommands:
         The resolver is initialised on first use so that name lookups work.
         """
         self.conn.ensure_resolver()
+        location_id = self.conn.resolve_location(location_name)
         result = self.sdk.move_to_location(
-            location_name,
+            location_id,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
@@ -118,9 +119,11 @@ class KachakaCommands:
     ) -> dict:
         """Pick up *shelf_name* and deliver it to *location_name*."""
         self.conn.ensure_resolver()
+        shelf_id = self.conn.resolve_shelf(shelf_name)
+        location_id = self.conn.resolve_location(location_name)
         result = self.sdk.move_shelf(
-            shelf_name,
-            location_name,
+            shelf_id,
+            location_id,
             cancel_all=cancel_all,
             tts_on_success=tts_on_success,
             title=title,
@@ -133,7 +136,8 @@ class KachakaCommands:
     def return_shelf(self, shelf_name: str = "", **kwargs) -> dict:
         """Return the shelf to its home location."""
         self.conn.ensure_resolver()
-        result = self.sdk.return_shelf(shelf_name, **kwargs)
+        shelf_id = self.conn.resolve_shelf(shelf_name) if shelf_name else ""
+        result = self.sdk.return_shelf(shelf_id, **kwargs)
         return self._result_to_dict(result, action="return_shelf", target=shelf_name or "(current)")
 
     @with_retry()
@@ -152,7 +156,7 @@ class KachakaCommands:
     def reset_shelf_pose(self, shelf_name: str) -> dict:
         """Reset the recorded pose of a shelf."""
         self.conn.ensure_resolver()
-        shelf_id = self.sdk.resolver.get_shelf_id_by_name(shelf_name)
+        shelf_id = self.conn.resolve_shelf(shelf_name)
         result = self.sdk.reset_shelf_pose(shelf_id)
         return self._result_to_dict(result, action="reset_shelf_pose", target=shelf_name)
 

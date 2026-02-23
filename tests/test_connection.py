@@ -103,14 +103,16 @@ class TestPing:
 
 class TestResolver:
     @patch("kachaka_core.connection.KachakaApiClient")
-    def test_ensure_resolver_calls_update(self, mock_cls):
+    def test_ensure_resolver_fetches_shelves_and_locations(self, mock_cls):
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
         conn = KachakaConnection.get("1.2.3.4")
         conn.ensure_resolver()
 
-        mock_client.update_resolver.assert_called_once()
+        mock_client.get_shelves.assert_called_once()
+        mock_client.get_locations.assert_called_once()
+        mock_client.update_resolver.assert_not_called()
 
     @patch("kachaka_core.connection.KachakaApiClient")
     def test_ensure_resolver_idempotent(self, mock_cls):
@@ -122,4 +124,38 @@ class TestResolver:
         conn.ensure_resolver()
 
         # Only called once because _resolver_ready is cached
-        mock_client.update_resolver.assert_called_once()
+        mock_client.get_shelves.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_resolve_shelf_by_name_and_id(self, mock_cls):
+        mock_client = MagicMock()
+        shelf = MagicMock()
+        shelf.name = "ShelfA"
+        shelf.id = "S01"
+        mock_client.get_shelves.return_value = [shelf]
+        mock_client.get_locations.return_value = []
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        conn.ensure_resolver()
+
+        assert conn.resolve_shelf("ShelfA") == "S01"
+        assert conn.resolve_shelf("S01") == "S01"
+        assert conn.resolve_shelf("unknown") == "unknown"
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_resolve_location_by_name_and_id(self, mock_cls):
+        mock_client = MagicMock()
+        loc = MagicMock()
+        loc.name = "Kitchen"
+        loc.id = "L01"
+        mock_client.get_shelves.return_value = []
+        mock_client.get_locations.return_value = [loc]
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        conn.ensure_resolver()
+
+        assert conn.resolve_location("Kitchen") == "L01"
+        assert conn.resolve_location("L01") == "L01"
+        assert conn.resolve_location("unknown") == "unknown"

@@ -39,6 +39,10 @@ class KachakaConnection:
         self._client: Optional[KachakaApiClient] = None
         self._client_lock = threading.Lock()
         self._resolver_ready = False
+        self._shelves: dict[str, str] = {}
+        self._shelf_ids: set[str] = set()
+        self._locations: dict[str, str] = {}
+        self._location_ids: set[str] = set()
 
     # ── Pool management ──────────────────────────────────────────────
 
@@ -97,22 +101,47 @@ class KachakaConnection:
     # ── Resolver ─────────────────────────────────────────────────────
 
     def ensure_resolver(self) -> bool:
-        """Refresh the shelf/location name-to-ID resolver.
+        """Fetch shelf/location lists and build our own name-to-ID maps.
 
-        The resolver is needed before any command that references a shelf
-        or location by *name*.  Safe to call multiple times.
+        We intentionally do NOT call ``sdk.update_resolver()`` so that
+        the SDK's internal resolver stays uninitialised.  All name→ID
+        resolution is performed by :meth:`resolve_shelf` and
+        :meth:`resolve_location` before handing raw IDs to the SDK.
         """
         if self._resolver_ready:
             return True
         try:
-            self.client.update_resolver()
-            self._patch_resolver()
+            sdk = self.client
+            self._shelves = {s.name: s.id for s in sdk.get_shelves()}
+            self._shelf_ids = set(self._shelves.values())
+            self._locations = {loc.name: loc.id for loc in sdk.get_locations()}
+            self._location_ids = set(self._locations.values())
             self._resolver_ready = True
             logger.info("Resolver ready for %s", self.target)
             return True
         except Exception as exc:
             logger.warning("Resolver init failed for %s: %s", self.target, exc)
             return False
+
+    def resolve_shelf(self, name_or_id: str) -> str:
+        """Resolve a shelf name or ID to its canonical ID."""
+        if name_or_id in self._shelf_ids:
+            return name_or_id
+        shelf_id = self._shelves.get(name_or_id)
+        if shelf_id:
+            return shelf_id
+        logger.warning("Shelf not found by name or ID: %s", name_or_id)
+        return name_or_id
+
+    def resolve_location(self, name_or_id: str) -> str:
+        """Resolve a location name or ID to its canonical ID."""
+        if name_or_id in self._location_ids:
+            return name_or_id
+        loc_id = self._locations.get(name_or_id)
+        if loc_id:
+            return loc_id
+        logger.warning("Location not found by name or ID: %s", name_or_id)
+        return name_or_id
 
     # ── Internal ─────────────────────────────────────────────────────
 
@@ -134,42 +163,6 @@ class KachakaConnection:
                     self.target,
                     exc,
                 )
-
-    def _patch_resolver(self) -> None:
-        """Extend the resolver to also match by ID (bio-patrol pattern).
-
-        The stock resolver only looks up by name.  In practice we often
-        receive IDs from the UI or from previous query results, so we
-        fall back to ID matching when name lookup fails.
-        """
-        resolver = self._client.resolver
-
-        _orig_shelf = resolver.get_shelf_id_by_name
-        _orig_loc = resolver.get_location_id_by_name
-
-        def get_shelf_id_by_name(name_or_id: str) -> str:
-            result = _orig_shelf(name_or_id)
-            if result != name_or_id:
-                return result
-            # Fallback: match by ID directly
-            for shelf in resolver.shelves:
-                if shelf.id == name_or_id:
-                    return shelf.id
-            logger.warning("Shelf not found by name or ID: %s", name_or_id)
-            return name_or_id
-
-        def get_location_id_by_name(name_or_id: str) -> str:
-            result = _orig_loc(name_or_id)
-            if result != name_or_id:
-                return result
-            for loc in resolver.locations:
-                if loc.id == name_or_id:
-                    return loc.id
-            logger.warning("Location not found by name or ID: %s", name_or_id)
-            return name_or_id
-
-        resolver.get_shelf_id_by_name = get_shelf_id_by_name
-        resolver.get_location_id_by_name = get_location_id_by_name
 
     @staticmethod
     def _normalise_target(target: str) -> str:

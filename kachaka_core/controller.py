@@ -400,9 +400,7 @@ class RobotController:
     ) -> dict:
         """Move the robot to a named location."""
         self._conn.ensure_resolver()
-        location_id = self._conn.client.resolver.resolve_location_id_or_name(
-            location_name
-        )
+        location_id = self._conn.resolve_location(location_name)
         cmd = pb2.Command(
             move_to_location_command=pb2.MoveToLocationCommand(
                 target_location_id=location_id
@@ -449,12 +447,8 @@ class RobotController:
     ) -> dict:
         """Move a shelf to a named location."""
         self._conn.ensure_resolver()
-        shelf_id = self._conn.client.resolver.resolve_shelf_id_or_name(
-            shelf_name
-        )
-        location_id = self._conn.client.resolver.resolve_location_id_or_name(
-            location_name
-        )
+        shelf_id = self._conn.resolve_shelf(shelf_name)
+        location_id = self._conn.resolve_location(location_name)
         cmd = pb2.Command(
             move_shelf_command=pb2.MoveShelfCommand(
                 target_shelf_id=shelf_id,
@@ -484,9 +478,7 @@ class RobotController:
         shelf_id = ""
         if shelf_name:
             self._conn.ensure_resolver()
-            shelf_id = self._conn.client.resolver.resolve_shelf_id_or_name(
-                shelf_name
-            )
+            shelf_id = self._conn.resolve_shelf(shelf_name)
         cmd = pb2.Command(
             return_shelf_command=pb2.ReturnShelfCommand(
                 target_shelf_id=shelf_id

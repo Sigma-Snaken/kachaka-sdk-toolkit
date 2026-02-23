@@ -197,6 +197,8 @@ class TestExecuteCommand:
         """
         conn, _ = _make_mock_conn()
         conn._client = mock_client  # Override with our custom mock
+        conn.resolve_shelf = MagicMock(side_effect=lambda n: f"shelf-{n}")
+        conn.resolve_location = MagicMock(side_effect=lambda n: f"loc-{n}")
         ctrl = RobotController(
             conn, fast_interval=60, slow_interval=60, poll_interval=0.05
         )
@@ -253,12 +255,9 @@ class TestExecuteCommand:
             success=True, command_id="cmd-abc"
         )
 
-        # Resolver for move_to_location
-        mock_client.resolver.resolve_location_id_or_name.return_value = "loc-123"
-
         ctrl = self._make_ctrl(mock_client)
-        # ensure_resolver is on the connection
         ctrl._conn._resolver_ready = True
+        ctrl._conn.resolve_location = MagicMock(return_value="loc-123")
 
         with patch("kachaka_core.controller.time.sleep"):
             result = ctrl.move_to_location("Kitchen", timeout=10.0)
@@ -433,9 +432,6 @@ class TestOtherMovementCommands:
     def _make_ctrl_immediate_success(self, command_id="cmd-123"):
         """Create a controller where any command succeeds immediately."""
         mock_client = MagicMock()
-        mock_client.update_resolver.return_value = None
-        mock_client.resolver.resolve_location_id_or_name.return_value = "loc-id"
-        mock_client.resolver.resolve_shelf_id_or_name.return_value = "shelf-id"
 
         start_resp = MagicMock()
         start_resp.result.success = True
@@ -456,6 +452,8 @@ class TestOtherMovementCommands:
         conn, _ = _make_mock_conn()
         conn._client = mock_client
         conn._resolver_ready = True
+        conn.resolve_shelf = MagicMock(return_value="shelf-id")
+        conn.resolve_location = MagicMock(return_value="loc-id")
         ctrl = RobotController(conn, fast_interval=60, slow_interval=60, poll_interval=0.01)
         return ctrl, mock_client
 
@@ -504,6 +502,8 @@ class TestErrorDescriptionEnrichment:
     def _make_ctrl(self, mock_client):
         conn, _ = _make_mock_conn()
         conn._client = mock_client
+        conn.resolve_shelf = MagicMock(side_effect=lambda n: f"shelf-{n}")
+        conn.resolve_location = MagicMock(side_effect=lambda n: f"loc-{n}")
         ctrl = RobotController(
             conn, fast_interval=60, slow_interval=60, poll_interval=0.05
         )
@@ -671,6 +671,8 @@ class TestRacingConditions:
         conn, _ = _make_mock_conn()
         conn._client = mock_client
         conn._resolver_ready = True
+        conn.resolve_shelf = MagicMock(side_effect=lambda n: f"shelf-{n}")
+        conn.resolve_location = MagicMock(side_effect=lambda n: f"loc-{n}")
         ctrl = RobotController(
             conn, fast_interval=60, slow_interval=60, poll_interval=0.01
         )
@@ -707,7 +709,6 @@ class TestRacingConditions:
         the result of the *old* command (cancelled).  B should succeed."""
         mock_client = MagicMock()
         stub = mock_client.stub
-        mock_client.resolver.resolve_location_id_or_name.side_effect = lambda n: f"loc-{n}"
 
         # Track StartCommand calls to return different command_ids
         start_call_count = 0
@@ -789,7 +790,6 @@ class TestRacingConditions:
         gets an error or timeout while the winner succeeds."""
         mock_client = MagicMock()
         stub = mock_client.stub
-        mock_client.resolver.resolve_location_id_or_name.side_effect = lambda n: f"loc-{n}"
 
         # Each StartCommand returns a unique command_id
         start_lock = threading.Lock()
