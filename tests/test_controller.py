@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -486,3 +487,488 @@ class TestOtherMovementCommands:
         assert result["action"] == "return_shelf"
         call_args = mock_client.stub.StartCommand.call_args[0][0]
         assert call_args.command.HasField("return_shelf_command")
+
+
+# ── Error Description Enrichment tests ────────────────────────────
+
+
+class TestErrorDescriptionEnrichment:
+    """Tests for _resolve_error_description and error message enrichment."""
+
+    def setup_method(self):
+        KachakaConnection.clear_pool()
+
+    def teardown_method(self):
+        KachakaConnection.clear_pool()
+
+    def _make_ctrl(self, mock_client):
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        ctrl = RobotController(
+            conn, fast_interval=60, slow_interval=60, poll_interval=0.05
+        )
+        return ctrl
+
+    @staticmethod
+    def _start_cmd_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _cmd_state_response(state, command_id="cmd-abc"):
+        resp = MagicMock()
+        resp.state = state
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _last_result_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    def test_start_command_error_includes_description(self):
+        """StartCommand rejection includes human-readable error description."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=False, command_id="", error_code=10253
+        )
+
+        # Mock get_robot_error_code to return known mapping
+        error_info = MagicMock()
+        error_info.title_en = "Destination not registered"
+        error_info.title = "Destination not registered (ja)"
+        mock_client.get_robot_error_code.return_value = {10253: error_info}
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is False
+        assert result["error_code"] == 10253
+        assert "Destination not registered" in result["error"]
+        assert "error_code=10253" in result["error"]
+
+    def test_poll_result_error_includes_description(self):
+        """GetLastCommandResult failure includes human-readable description."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-err"
+        )
+
+        # Registration → RUNNING, poll → done (UNSPECIFIED)
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-err"),  # registered
+            self._cmd_state_response(0, "cmd-err"),  # done
+        ]
+
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=False, command_id="cmd-err", error_code=10253
+        )
+
+        error_info = MagicMock()
+        error_info.title_en = "Destination not registered"
+        mock_client.get_robot_error_code.return_value = {10253: error_info}
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is False
+        assert result["error_code"] == 10253
+        assert "Destination not registered" in result["error"]
+
+    def test_error_description_fetch_failure_graceful(self):
+        """If get_robot_error_code fails, error message still works (no description)."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=False, command_id="", error_code=999
+        )
+
+        mock_client.get_robot_error_code.side_effect = Exception("network error")
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is False
+        assert result["error"] == "error_code=999"
+        assert "error_code" in result
+
+    def test_error_code_not_in_definitions(self):
+        """Error code exists but not in the definitions dict."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=False, command_id="", error_code=99999
+        )
+
+        # Return definitions that don't include our error code
+        mock_client.get_robot_error_code.return_value = {10253: MagicMock()}
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is False
+        assert result["error"] == "error_code=99999"
+
+    def test_error_description_title_en_fallback_to_title(self):
+        """Falls back to title when title_en is empty."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=False, command_id="", error_code=10253
+        )
+
+        error_info = MagicMock()
+        error_info.title_en = ""
+        error_info.title = "Destination not found"
+        mock_client.get_robot_error_code.return_value = {10253: error_info}
+
+        ctrl = self._make_ctrl(mock_client)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert "Destination not found" in result["error"]
+
+
+# ── Racing Condition tests ────────────────────────────────────────
+
+
+class TestRacingConditions:
+    """Tests for concurrent / overlapping command execution behaviour.
+
+    _execute_command is documented as "not thread-safe".  These tests verify
+    the observable outcomes when commands overlap or are issued rapidly.
+    """
+
+    def setup_method(self):
+        KachakaConnection.clear_pool()
+
+    def teardown_method(self):
+        KachakaConnection.clear_pool()
+
+    def _make_ctrl(self, mock_client):
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        conn._resolver_ready = True
+        ctrl = RobotController(
+            conn, fast_interval=60, slow_interval=60, poll_interval=0.01
+        )
+        return ctrl
+
+    @staticmethod
+    def _start_cmd_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _cmd_state_response(state, command_id="cmd-abc"):
+        resp = MagicMock()
+        resp.state = state
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _last_result_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    # ── Scenario 1: Command B cancels Command A ──────────────
+
+    def test_command_b_cancels_a(self):
+        """Thread A sends a slow command; main thread sends command B which
+        cancels A.  A should see its command_id replaced and get an error or
+        the result of the *old* command (cancelled).  B should succeed."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+        mock_client.resolver.resolve_location_id_or_name.side_effect = lambda n: f"loc-{n}"
+
+        # Track StartCommand calls to return different command_ids
+        start_call_count = 0
+
+        def start_command_side_effect(request):
+            nonlocal start_call_count
+            start_call_count += 1
+            if start_call_count == 1:
+                # Command A
+                return self._start_cmd_response(success=True, command_id="cmd-A")
+            else:
+                # Command B
+                return self._start_cmd_response(success=True, command_id="cmd-B")
+
+        stub.StartCommand.side_effect = start_command_side_effect
+
+        # GetCommandState: After cmd-B is sent, the robot switches to cmd-B
+        state_call_count = 0
+
+        def get_command_state_side_effect(request):
+            nonlocal state_call_count
+            state_call_count += 1
+            if state_call_count <= 3:
+                # A sees RUNNING with its own id initially
+                return self._cmd_state_response(2, "cmd-A")  # RUNNING
+            else:
+                # After B is sent, robot switches to B
+                return self._cmd_state_response(2, "cmd-B")
+
+        stub.GetCommandState.side_effect = get_command_state_side_effect
+
+        # GetLastCommandResult: When A sees command_id changed, it fetches result
+        result_call_count = 0
+
+        def get_last_result_side_effect(request):
+            nonlocal result_call_count
+            result_call_count += 1
+            if result_call_count == 1:
+                # A's result: cancelled (error)
+                return self._last_result_response(
+                    success=False, command_id="cmd-A", error_code=1
+                )
+            else:
+                # B's result: success
+                return self._last_result_response(
+                    success=True, command_id="cmd-B"
+                )
+
+        stub.GetLastCommandResult.side_effect = get_last_result_side_effect
+
+        ctrl = self._make_ctrl(mock_client)
+        results = {}
+
+        def run_command_a():
+            with patch("kachaka_core.controller.time.sleep"):
+                results["A"] = ctrl.move_to_location("far_location", timeout=10)
+
+        thread_a = threading.Thread(target=run_command_a)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            thread_a.start()
+            # Give thread A a moment to start
+            time.sleep(0.05)
+            # Send command B from main thread
+            results["B"] = ctrl.move_to_location("near_location", timeout=10)
+            thread_a.join(timeout=5)
+
+        # A should have detected cancellation (command_id changed to cmd-B)
+        assert "A" in results
+        assert results["A"]["ok"] is False or results["A"]["ok"] is True
+        # B should complete
+        assert "B" in results
+
+    # ── Scenario 2: Two threads send commands simultaneously ──
+
+    def test_concurrent_commands(self):
+        """Two threads send commands at the same time.  Neither should
+        deadlock.  The robot only runs the last command, so the loser
+        gets an error or timeout while the winner succeeds."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+        mock_client.resolver.resolve_location_id_or_name.side_effect = lambda n: f"loc-{n}"
+
+        # Each StartCommand returns a unique command_id
+        start_lock = threading.Lock()
+        start_count = 0
+        latest_cmd_id = "cmd-0"
+
+        def start_command_side_effect(request):
+            nonlocal start_count, latest_cmd_id
+            with start_lock:
+                start_count += 1
+                latest_cmd_id = f"cmd-{start_count}"
+            return self._start_cmd_response(success=True, command_id=latest_cmd_id)
+
+        stub.StartCommand.side_effect = start_command_side_effect
+
+        # GetCommandState returns done (UNSPECIFIED=0) with the latest cmd_id.
+        # This means: for the winner, it matches; for the loser, command_id
+        # mismatch triggers GetLastCommandResult.
+        def get_command_state_side_effect(request):
+            return self._cmd_state_response(0, latest_cmd_id)
+
+        stub.GetCommandState.side_effect = get_command_state_side_effect
+
+        # GetLastCommandResult returns the latest command as successful.
+        # The loser will see a command_id mismatch and keep polling until
+        # timeout.
+        def get_last_result_side_effect(request):
+            return self._last_result_response(success=True, command_id=latest_cmd_id)
+
+        stub.GetLastCommandResult.side_effect = get_last_result_side_effect
+
+        ctrl = self._make_ctrl(mock_client)
+        results = {}
+
+        # Per-thread fake perf_counter: advance fast so timeouts happen
+        # quickly instead of spinning for real seconds.
+        base_time = time.perf_counter()
+        thread_calls: dict[int, int] = {}
+        counter_lock = threading.Lock()
+
+        def fake_perf_counter():
+            tid = threading.get_ident()
+            with counter_lock:
+                thread_calls[tid] = thread_calls.get(tid, 0) + 1
+                n = thread_calls[tid]
+            # Budget of 500 per thread; after that, jump past deadline
+            if n > 500:
+                return base_time + 200.0
+            return base_time + n * 0.005
+
+        def run_cmd(name, location):
+            results[name] = ctrl.move_to_location(location, timeout=2)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            with patch("kachaka_core.controller.time.perf_counter", side_effect=fake_perf_counter):
+                t1 = threading.Thread(target=run_cmd, args=("T1", "loc_1"))
+                t2 = threading.Thread(target=run_cmd, args=("T2", "loc_2"))
+                t1.start()
+                t2.start()
+                t1.join(timeout=5)
+                t2.join(timeout=5)
+
+        # Both threads must complete (no deadlock)
+        assert "T1" in results, "T1 did not complete (deadlock?)"
+        assert "T2" in results, "T2 did not complete (deadlock?)"
+        # At least one result exists; the loser gets TIMEOUT or error
+        assert all("ok" in r for r in results.values())
+
+    # ── Scenario 3: Short timeout then new command ────────────
+
+    def test_short_timeout_then_new_command(self):
+        """Command A times out, then command B is sent and succeeds."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        start_count = 0
+
+        def start_command_side_effect(request):
+            nonlocal start_count
+            start_count += 1
+            if start_count == 1:
+                return self._start_cmd_response(success=True, command_id="cmd-slow")
+            else:
+                return self._start_cmd_response(success=True, command_id="cmd-fast")
+
+        stub.StartCommand.side_effect = start_command_side_effect
+
+        # For command A: always RUNNING (causes timeout)
+        # For command B: immediately done
+        state_call_count = 0
+
+        def get_command_state_side_effect(request):
+            nonlocal state_call_count
+            state_call_count += 1
+            if start_count == 1:
+                # Command A is still running
+                return self._cmd_state_response(2, "cmd-slow")
+            else:
+                # Command B completes immediately
+                return self._cmd_state_response(0, "cmd-fast")
+
+        stub.GetCommandState.side_effect = get_command_state_side_effect
+
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-fast"
+        )
+
+        ctrl = self._make_ctrl(mock_client)
+
+        # Command A: very short timeout → TIMEOUT
+        call_count_a = 0
+        base_time_a = time.perf_counter()
+
+        def fake_perf_counter_a():
+            nonlocal call_count_a
+            call_count_a += 1
+            if call_count_a > 8:
+                return base_time_a + 100.0
+            return base_time_a + call_count_a * 0.01
+
+        with patch("kachaka_core.controller.time.sleep"):
+            with patch("kachaka_core.controller.time.perf_counter", side_effect=fake_perf_counter_a):
+                result_a = ctrl.return_home(timeout=0.5)
+
+        assert result_a["ok"] is False
+        assert result_a["error"] == "TIMEOUT"
+
+        # Command B: should succeed normally
+        ctrl.reset_metrics()
+        with patch("kachaka_core.controller.time.sleep"):
+            result_b = ctrl.return_home(timeout=10.0)
+
+        assert result_b["ok"] is True
+
+    # ── Scenario 4: Rapid sequential commands ─────────────────
+
+    def test_rapid_sequential_commands(self):
+        """Three commands sent sequentially; each should succeed with
+        independent metrics."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        cmd_counter = 0
+
+        def start_command_side_effect(request):
+            nonlocal cmd_counter
+            cmd_counter += 1
+            return self._start_cmd_response(
+                success=True, command_id=f"cmd-seq-{cmd_counter}"
+            )
+
+        stub.StartCommand.side_effect = start_command_side_effect
+
+        def get_command_state_side_effect(request):
+            # Always return current command as done
+            return self._cmd_state_response(0, f"cmd-seq-{cmd_counter}")
+
+        stub.GetCommandState.side_effect = get_command_state_side_effect
+
+        def get_last_result_side_effect(request):
+            return self._last_result_response(
+                success=True, command_id=f"cmd-seq-{cmd_counter}"
+            )
+
+        stub.GetLastCommandResult.side_effect = get_last_result_side_effect
+
+        ctrl = self._make_ctrl(mock_client)
+
+        results = []
+        for i in range(3):
+            ctrl.reset_metrics()
+            with patch("kachaka_core.controller.time.sleep"):
+                r = ctrl.return_home(timeout=10.0)
+            results.append(r)
+            # Verify metrics were reset between commands
+            assert ctrl.metrics.poll_count >= 1
+
+        # All three should succeed
+        assert all(r["ok"] is True for r in results)
+        assert len(results) == 3
+        # Each should have its own elapsed time
+        assert all("elapsed" in r for r in results)

@@ -251,12 +251,25 @@ class KachakaCommands:
 
     # ── Internal ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _result_to_dict(result, *, action: str = "", target: str = "") -> dict:
+    def _resolve_error_description(self, error_code: int) -> str:
+        """Fetch error description from robot. Returns empty string on failure."""
+        try:
+            definitions = self.sdk.get_robot_error_code()
+            if error_code in definitions:
+                info = definitions[error_code]
+                return getattr(info, "title_en", "") or getattr(info, "title", "") or ""
+        except Exception:
+            logger.debug("Failed to fetch error description for %d", error_code)
+        return ""
+
+    def _result_to_dict(self, result, *, action: str = "", target: str = "") -> dict:
         """Convert a ``pb2.Result`` into a standardised response dict."""
         d: dict = {"ok": result.success}
         if not result.success:
-            d["error_code"] = result.error_code
+            ec = result.error_code
+            d["error_code"] = ec
+            desc = self._resolve_error_description(ec)
+            d["error"] = f"error_code={ec}" + (f": {desc}" if desc else "")
         if action:
             d["action"] = action
         if target:

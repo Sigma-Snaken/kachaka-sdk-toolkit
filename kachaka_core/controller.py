@@ -209,6 +209,19 @@ class RobotController:
 
             self._stop_event.wait(self._fast_interval)
 
+    # ── Error resolution ─────────────────────────────────────
+
+    def _resolve_error_description(self, error_code: int) -> str:
+        """Fetch error description from robot. Returns empty string on failure."""
+        try:
+            definitions = self._conn.client.get_robot_error_code()
+            if error_code in definitions:
+                info = definitions[error_code]
+                return getattr(info, "title_en", "") or getattr(info, "title", "") or ""
+        except Exception:
+            logger.debug("Failed to fetch error description for %d", error_code)
+        return ""
+
     # ── Command execution engine ──────────────────────────────
 
     def _execute_command(
@@ -265,12 +278,14 @@ class RobotController:
         # 2. If the robot rejected the command immediately, return error
         if not start_resp.result.success:
             elapsed = time.perf_counter() - t0
+            ec = start_resp.result.error_code
+            desc = self._resolve_error_description(ec)
             return {
                 "ok": False,
                 "action": action,
                 "target": target,
-                "error_code": start_resp.result.error_code,
-                "error": f"error_code={start_resp.result.error_code}",
+                "error_code": ec,
+                "error": f"error_code={ec}" + (f": {desc}" if desc else ""),
                 "elapsed": elapsed,
             }
 
@@ -344,12 +359,14 @@ class RobotController:
                             "elapsed": elapsed,
                         }
                     else:
+                        ec = result_resp.result.error_code
+                        desc = self._resolve_error_description(ec)
                         return {
                             "ok": False,
                             "action": action,
                             "target": target,
-                            "error_code": result_resp.result.error_code,
-                            "error": f"error_code={result_resp.result.error_code}",
+                            "error_code": ec,
+                            "error": f"error_code={ec}" + (f": {desc}" if desc else ""),
                             "elapsed": elapsed,
                         }
                 # command_id mismatch — our command might still be pending
