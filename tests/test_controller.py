@@ -167,5 +167,9 @@ class TestRobotControllerLifecycle:
         ctrl = RobotController(conn, fast_interval=0.05, slow_interval=0.05)
         ctrl.start()
         time.sleep(0.2)
-        # Thread should survive errors, state may have partial updates
-        ctrl.stop()  # should not hang
+        # Thread should still be alive despite fast-cycle errors
+        assert ctrl._thread is not None and ctrl._thread.is_alive()
+        # Battery (slow cycle) should still update since only pose errors
+        state = ctrl.state
+        assert state.battery_pct == 85
+        ctrl.stop()
