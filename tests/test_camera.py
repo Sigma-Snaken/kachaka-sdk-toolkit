@@ -43,7 +43,13 @@ class TestInit:
 
         assert cs.is_running is False
         assert cs.latest_frame is None
-        assert cs.stats == {"total_frames": 0, "dropped": 0, "drop_rate_pct": 0.0}
+        assert cs.stats == {
+            "total_frames": 0,
+            "dropped": 0,
+            "drop_rate_pct": 0.0,
+            "longest_gap_s": 0.0,
+            "recovery_latency_ms": None,
+        }
 
     def test_custom_params(self):
         mock = MagicMock()
@@ -407,3 +413,113 @@ class TestThreadSafety:
         cs.stop()
 
         assert len(errors) == 0
+
+
+class TestRecoveryMetrics:
+    """Tests for CameraStreamer recovery observability metrics."""
+
+    def test_longest_gap_zero_initially(self):
+        """Before any frames, longest_gap_s should be 0."""
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=1.0)
+
+        assert cs.stats["longest_gap_s"] == 0.0
+
+    def test_recovery_latency_none_without_reconnect(self):
+        """Without a reconnect event, recovery_latency_ms should be None."""
+        mock = MagicMock()
+        mock.get_front_camera_ros_compressed_image.return_value = MagicMock(
+            data=b"\xff\xd8data", format="jpeg"
+        )
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=0.05)
+
+        cs.start()
+        time.sleep(0.15)
+        cs.stop()
+
+        assert cs.stats["recovery_latency_ms"] is None
+
+    def test_stats_includes_longest_gap(self):
+        """longest_gap_s should track max time between successful frames."""
+        mock = MagicMock()
+        call_count = 0
+
+        def slow_then_fast():
+            nonlocal call_count
+            call_count += 1
+            # First two calls succeed quickly (establishing _last_success_time)
+            # Third call sleeps to create a measurable gap
+            if call_count == 3:
+                time.sleep(0.15)
+            return MagicMock(data=b"\xff\xd8data", format="jpeg")
+
+        mock.get_front_camera_ros_compressed_image.side_effect = slow_then_fast
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=0.02)
+
+        cs.start()
+        time.sleep(0.5)
+        cs.stop()
+
+        # The gap created by the 150ms sleep should be captured
+        assert cs.stats["longest_gap_s"] > 0.1
+
+    def test_stats_includes_recovery_latency(self):
+        """recovery_latency_ms should measure time from reconnect to first frame."""
+        from kachaka_core.connection import ConnectionState
+
+        mock = MagicMock()
+        mock.get_front_camera_ros_compressed_image.return_value = MagicMock(
+            data=b"\xff\xd8data", format="jpeg"
+        )
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=0.05)
+
+        # Simulate a reconnect event, then let a frame be captured
+        cs.notify_state_change(ConnectionState.CONNECTED)
+        cs.start()
+        time.sleep(0.15)
+        cs.stop()
+
+        latency = cs.stats["recovery_latency_ms"]
+        assert latency is not None
+        assert latency > 0
+
+    def test_recovery_latency_only_set_once_per_reconnect(self):
+        """Second successful frame after reconnect should not update recovery_latency_ms."""
+        from kachaka_core.connection import ConnectionState
+
+        mock = MagicMock()
+        mock.get_front_camera_ros_compressed_image.return_value = MagicMock(
+            data=b"\xff\xd8data", format="jpeg"
+        )
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=0.05)
+
+        cs.notify_state_change(ConnectionState.CONNECTED)
+        cs.start()
+        time.sleep(0.2)  # allow multiple frames
+        cs.stop()
+
+        # Should have captured multiple frames
+        assert cs.stats["total_frames"] >= 2
+
+        # Recovery latency should be set from the first frame only
+        latency = cs.stats["recovery_latency_ms"]
+        assert latency is not None
+
+        # Verify _reconnected_at was cleared (internal check)
+        assert cs._reconnected_at is None
+
+    def test_notify_state_change_disconnected_ignored(self):
+        """DISCONNECTED state should not set _reconnected_at."""
+        from kachaka_core.connection import ConnectionState
+
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        cs = CameraStreamer(conn, interval=1.0)
+
+        cs.notify_state_change(ConnectionState.DISCONNECTED)
+        assert cs._reconnected_at is None

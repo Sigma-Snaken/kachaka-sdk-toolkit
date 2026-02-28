@@ -15,7 +15,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Callable, Optional
 
-from .connection import KachakaConnection
+from .connection import ConnectionState, KachakaConnection
 
 if TYPE_CHECKING:
     from .detection import ObjectDetector
@@ -68,6 +68,12 @@ class CameraStreamer:
         # Counters (only written by the capture thread, reads are atomic on CPython)
         self._total_frames: int = 0
         self._dropped: int = 0
+
+        # Recovery metrics
+        self._last_success_time: float | None = None
+        self._longest_gap_s: float = 0.0
+        self._reconnected_at: float | None = None
+        self._recovery_latency_ms: float | None = None
 
         # Detection overlay support
         # If annotate requested, force detect on
@@ -127,7 +133,7 @@ class CameraStreamer:
 
     @property
     def stats(self) -> dict:
-        """Capture statistics: total_frames, dropped, drop_rate_pct."""
+        """Capture statistics: total_frames, dropped, drop_rate_pct, recovery metrics."""
         total = self._total_frames
         dropped = self._dropped
         rate = (dropped / total * 100.0) if total > 0 else 0.0
@@ -135,7 +141,24 @@ class CameraStreamer:
             "total_frames": total,
             "dropped": dropped,
             "drop_rate_pct": rate,
+            "longest_gap_s": round(self._longest_gap_s, 3),
+            "recovery_latency_ms": (
+                round(self._recovery_latency_ms, 1)
+                if self._recovery_latency_ms is not None
+                else None
+            ),
         }
+
+    def notify_state_change(self, state: ConnectionState) -> None:
+        """Receive connection state changes from external monitoring.
+
+        When the connection transitions to CONNECTED, record the timestamp
+        so that the next successful capture can compute recovery latency.
+        CameraStreamer does NOT start its own monitoring — the caller wires
+        this method to :meth:`KachakaConnection.start_monitoring`.
+        """
+        if state == ConnectionState.CONNECTED:
+            self._reconnected_at = time.perf_counter()
 
     # ── Internal ─────────────────────────────────────────────────────
 
@@ -194,6 +217,19 @@ class CameraStreamer:
                         self._on_frame(frame)
                     except Exception:
                         logger.warning("on_frame callback raised an exception", exc_info=True)
+
+                # Recovery metrics tracking
+                now = time.perf_counter()
+                if self._last_success_time is not None:
+                    gap = now - self._last_success_time
+                    self._longest_gap_s = max(self._longest_gap_s, gap)
+                if (
+                    self._reconnected_at is not None
+                    and self._recovery_latency_ms is None
+                ):
+                    self._recovery_latency_ms = (now - self._reconnected_at) * 1000
+                    self._reconnected_at = None
+                self._last_success_time = now
 
             except Exception:
                 self._dropped += 1
