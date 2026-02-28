@@ -19,7 +19,7 @@ from typing import Callable, Optional
 
 from kachaka_api.generated import kachaka_api_pb2 as pb2
 
-from .connection import KachakaConnection
+from .connection import ConnectionState, KachakaConnection
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,9 @@ class RobotState:
     last_updated: float = 0.0
     moving_shelf_id: Optional[str] = None
     shelf_dropped: bool = False
+    connection_state: str = "connected"
+    disconnected_at: Optional[float] = None
+    last_reconnect_at: Optional[float] = None
 
 
 @dataclass
@@ -168,6 +171,10 @@ class RobotController:
         if self._thread is not None and self._thread.is_alive():
             return
         self._stop_event.clear()
+        self._conn.start_monitoring(
+            interval=self._fast_interval,
+            on_state_change=self._on_conn_state_change,
+        )
         self._thread = threading.Thread(target=self._state_loop, daemon=True)
         self._thread.start()
         logger.info(
@@ -178,6 +185,7 @@ class RobotController:
 
     def stop(self) -> None:
         """Stop the background state polling thread. No-op if not running."""
+        self._conn.stop_monitoring()
         if self._thread is None or not self._thread.is_alive():
             return
         self._stop_event.set()
@@ -222,6 +230,41 @@ class RobotController:
 
             self._stop_event.wait(self._fast_interval)
 
+    # ── Connection state callback ─────────────────────────────
+
+    def _on_conn_state_change(self, new_state: ConnectionState) -> None:
+        """Called by KachakaConnection monitoring on state transitions."""
+        with self._state_lock:
+            self._state.connection_state = new_state.value
+            if new_state == ConnectionState.DISCONNECTED:
+                self._state.disconnected_at = time.perf_counter()
+            elif new_state == ConnectionState.CONNECTED:
+                self._state.last_reconnect_at = time.perf_counter()
+
+        if new_state == ConnectionState.CONNECTED:
+            # Trigger immediate probe in a background thread to avoid
+            # blocking the monitoring callback.
+            threading.Thread(
+                target=self._reconnect_probe, daemon=True
+            ).start()
+
+    def _reconnect_probe(self) -> None:
+        """Immediate state refresh after reconnection."""
+        sdk = self._conn.client
+        try:
+            pose = sdk.get_robot_pose()
+            is_running = sdk.is_command_running()
+            battery_pct, _ = sdk.get_battery_info()
+            with self._state_lock:
+                self._state.pose_x = pose.x
+                self._state.pose_y = pose.y
+                self._state.pose_theta = pose.theta
+                self._state.is_command_running = is_running
+                self._state.battery_pct = int(battery_pct)
+                self._state.last_updated = time.time()
+        except Exception:
+            logger.debug("Reconnect probe failed", exc_info=True)
+
     # ── Error resolution ─────────────────────────────────────
 
     def _resolve_error_description(self, error_code: int) -> str:
@@ -261,6 +304,21 @@ class RobotController:
         stub = self._conn.client.stub
         deadline = time.perf_counter() + timeout
         t0 = time.perf_counter()
+
+        # 0. Wait for connection if currently disconnected
+        if self._conn.state == ConnectionState.DISCONNECTED:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0 or not self._conn.wait_for_state(
+                ConnectionState.CONNECTED, timeout=remaining
+            ):
+                elapsed = time.perf_counter() - t0
+                return {
+                    "ok": False,
+                    "action": action,
+                    "target": target,
+                    "error": "DISCONNECTED",
+                    "elapsed": elapsed,
+                }
 
         # 1. Start the command (with retry until deadline)
         request = pb2.StartCommandRequest(

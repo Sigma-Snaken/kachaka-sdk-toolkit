@@ -15,7 +15,7 @@ from kachaka_core.controller import (
     RobotState,
     _call_with_retry,
 )
-from kachaka_core.connection import KachakaConnection
+from kachaka_core.connection import ConnectionState, KachakaConnection
 
 
 class TestRobotState:
@@ -1182,3 +1182,208 @@ class TestShelfMonitor:
         assert ctrl._monitoring_shelf is False
         assert ctrl.state.shelf_dropped is False
         assert ctrl.state.moving_shelf_id is None
+
+
+# ── Disconnect Handling tests ────────────────────────────────────
+
+
+class TestDisconnectHandling:
+    """Tests for RobotController disconnect handling via ConnectionState monitoring."""
+
+    def setup_method(self):
+        KachakaConnection.clear_pool()
+
+    def teardown_method(self):
+        KachakaConnection.clear_pool()
+
+    def _make_ctrl(self, mock_client):
+        conn, _ = _make_mock_conn()
+        conn._client = mock_client
+        conn.resolve_shelf = MagicMock(side_effect=lambda n: f"shelf-{n}")
+        conn.resolve_location = MagicMock(side_effect=lambda n: f"loc-{n}")
+        ctrl = RobotController(
+            conn, fast_interval=60, slow_interval=60, poll_interval=0.05
+        )
+        return ctrl, conn
+
+    @staticmethod
+    def _start_cmd_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _cmd_state_response(state, command_id="cmd-abc"):
+        resp = MagicMock()
+        resp.state = state
+        resp.command_id = command_id
+        return resp
+
+    @staticmethod
+    def _last_result_response(success=True, command_id="cmd-abc", error_code=0):
+        resp = MagicMock()
+        resp.result.success = success
+        resp.result.error_code = error_code
+        resp.command_id = command_id
+        return resp
+
+    def test_execute_command_waits_during_disconnect(self):
+        """Command execution should wait for reconnect instead of retrying."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-wait"
+        )
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-wait"),  # registered
+            self._cmd_state_response(0, "cmd-wait"),  # done
+        ]
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-wait"
+        )
+
+        ctrl, conn = self._make_ctrl(mock_client)
+
+        # Simulate DISCONNECTED state, then switch to CONNECTED after brief delay
+        conn._state = ConnectionState.DISCONNECTED
+
+        def fake_wait_for_state(target_state, timeout=None):
+            # Simulate reconnection
+            conn._state = ConnectionState.CONNECTED
+            return True
+
+        conn.wait_for_state = MagicMock(side_effect=fake_wait_for_state)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is True
+        # Verify wait_for_state was called with CONNECTED
+        conn.wait_for_state.assert_called_once()
+        call_args = conn.wait_for_state.call_args
+        assert call_args[0][0] == ConnectionState.CONNECTED
+
+    def test_execute_command_timeout_during_disconnect(self):
+        """Should return DISCONNECTED error if reconnect doesn't happen within timeout."""
+        mock_client = MagicMock()
+        ctrl, conn = self._make_ctrl(mock_client)
+
+        # Simulate permanently disconnected
+        conn._state = ConnectionState.DISCONNECTED
+        conn.wait_for_state = MagicMock(return_value=False)
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=5.0)
+
+        assert result["ok"] is False
+        assert result["error"] == "DISCONNECTED"
+        assert "elapsed" in result
+        assert result["action"] == "return_home"
+
+    def test_state_snapshot_includes_connection_state(self):
+        """State snapshot should include connection_state field."""
+        conn, _ = _make_mock_conn()
+        ctrl = RobotController(conn)
+
+        state = ctrl.state
+        assert state.connection_state == "connected"
+        assert state.disconnected_at is None
+        assert state.last_reconnect_at is None
+
+        # Simulate state change via callback
+        ctrl._on_conn_state_change(ConnectionState.DISCONNECTED)
+
+        state = ctrl.state
+        assert state.connection_state == "disconnected"
+        assert state.disconnected_at is not None
+
+        ctrl._on_conn_state_change(ConnectionState.CONNECTED)
+
+        state = ctrl.state
+        assert state.connection_state == "connected"
+        assert state.last_reconnect_at is not None
+
+    def test_on_reconnect_probes(self):
+        """After reconnect, should immediately update pose/battery/command_state."""
+        mock_client = MagicMock()
+
+        # Set up return values for the probe calls
+        pose = MagicMock()
+        pose.x, pose.y, pose.theta = 5.0, 6.0, 1.5
+        mock_client.get_robot_pose.return_value = pose
+        mock_client.is_command_running.return_value = True
+        mock_client.get_battery_info.return_value = (72, "CHARGING")
+
+        ctrl, conn = self._make_ctrl(mock_client)
+
+        # Trigger reconnect callback — the probe runs in a separate thread
+        ctrl._on_conn_state_change(ConnectionState.CONNECTED)
+
+        # Wait briefly for the probe thread to complete
+        time.sleep(0.2)
+
+        state = ctrl.state
+        assert state.connection_state == "connected"
+        assert state.pose_x == 5.0
+        assert state.pose_y == 6.0
+        assert state.pose_theta == 1.5
+        assert state.is_command_running is True
+        assert state.battery_pct == 72
+        assert state.last_reconnect_at is not None
+
+    def test_start_calls_start_monitoring(self):
+        """start() should subscribe to connection state changes."""
+        conn, _ = _make_mock_conn()
+        conn.start_monitoring = MagicMock()
+        ctrl = RobotController(conn, fast_interval=60, slow_interval=60)
+
+        ctrl.start()
+        try:
+            conn.start_monitoring.assert_called_once()
+            call_kwargs = conn.start_monitoring.call_args
+            assert call_kwargs[1]["interval"] == 60
+            assert call_kwargs[1]["on_state_change"] == ctrl._on_conn_state_change
+        finally:
+            ctrl.stop()
+
+    def test_stop_calls_stop_monitoring(self):
+        """stop() should unsubscribe from connection state changes."""
+        conn, _ = _make_mock_conn()
+        conn.start_monitoring = MagicMock()
+        conn.stop_monitoring = MagicMock()
+        ctrl = RobotController(conn, fast_interval=0.05, slow_interval=60)
+
+        ctrl.start()
+        time.sleep(0.1)
+        ctrl.stop()
+
+        conn.stop_monitoring.assert_called_once()
+
+    def test_execute_command_proceeds_when_connected(self):
+        """When connected, _execute_command should not call wait_for_state."""
+        mock_client = MagicMock()
+        stub = mock_client.stub
+
+        stub.StartCommand.return_value = self._start_cmd_response(
+            success=True, command_id="cmd-ok"
+        )
+        stub.GetCommandState.side_effect = [
+            self._cmd_state_response(2, "cmd-ok"),  # registered
+            self._cmd_state_response(0, "cmd-ok"),  # done
+        ]
+        stub.GetLastCommandResult.return_value = self._last_result_response(
+            success=True, command_id="cmd-ok"
+        )
+
+        ctrl, conn = self._make_ctrl(mock_client)
+        # conn.state is CONNECTED by default
+        conn.wait_for_state = MagicMock()
+
+        with patch("kachaka_core.controller.time.sleep"):
+            result = ctrl.return_home(timeout=10.0)
+
+        assert result["ok"] is True
+        conn.wait_for_state.assert_not_called()
