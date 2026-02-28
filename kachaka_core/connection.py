@@ -10,9 +10,11 @@ to obtain a pooled, verified connection.
 
 from __future__ import annotations
 
+import enum
 import logging
 import threading
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 import grpc
 from kachaka_api import KachakaApiClient
@@ -21,6 +23,13 @@ from kachaka_api.generated.kachaka_api_pb2_grpc import KachakaApiStub
 from kachaka_core.interceptors import TimeoutInterceptor
 
 logger = logging.getLogger(__name__)
+
+
+class ConnectionState(enum.Enum):
+    """Connection health state (two-state: no rebuild needed)."""
+
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
 
 
 class KachakaConnection:
@@ -46,6 +55,14 @@ class KachakaConnection:
         self._shelf_ids: set[str] = set()
         self._locations: dict[str, str] = {}
         self._location_ids: set[str] = set()
+
+        # ── Monitoring state ──
+        self._state = ConnectionState.CONNECTED
+        self._state_lock = threading.Lock()
+        self._state_condition = threading.Condition(self._state_lock)
+        self._on_state_change: Optional[Callable[[ConnectionState], None]] = None
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._monitor_stop = threading.Event()
 
     # ── Pool management ──────────────────────────────────────────────
 
@@ -145,6 +162,85 @@ class KachakaConnection:
             return loc_id
         logger.warning("Location not found by name or ID: %s", name_or_id)
         return name_or_id
+
+    # ── Connection monitoring ────────────────────────────────────────
+
+    @property
+    def state(self) -> ConnectionState:
+        """Current connection state (thread-safe read)."""
+        with self._state_lock:
+            return self._state
+
+    def start_monitoring(
+        self,
+        interval: float = 5.0,
+        on_state_change: Optional[Callable[[ConnectionState], None]] = None,
+    ) -> None:
+        """Start background health-check loop.
+
+        Args:
+            interval: Seconds between pings.
+            on_state_change: Called on CONNECTED ↔ DISCONNECTED transitions.
+        """
+        if self._monitor_thread is not None and self._monitor_thread.is_alive():
+            return
+        self._on_state_change = on_state_change
+        self._monitor_stop.clear()
+        self._monitor_thread = threading.Thread(
+            target=self._health_check_loop,
+            args=(interval,),
+            daemon=True,
+            name=f"conn-monitor-{self.target}",
+        )
+        self._monitor_thread.start()
+        logger.info("Started monitoring for %s (interval=%.1fs)", self.target, interval)
+
+    def stop_monitoring(self) -> None:
+        """Stop background health-check loop."""
+        if self._monitor_thread is None:
+            return
+        self._monitor_stop.set()
+        self._monitor_thread.join(timeout=10.0)
+        self._monitor_thread = None
+        self._on_state_change = None
+        logger.info("Stopped monitoring for %s", self.target)
+
+    def wait_for_state(
+        self, target_state: ConnectionState, timeout: float | None = None
+    ) -> bool:
+        """Block until connection reaches *target_state*.
+
+        Returns True if the state was reached, False on timeout.
+        """
+        with self._state_condition:
+            return self._state_condition.wait_for(
+                lambda: self._state == target_state,
+                timeout=timeout,
+            )
+
+    def _set_state(self, new_state: ConnectionState) -> None:
+        """Update state and notify waiters + callback."""
+        with self._state_condition:
+            if self._state == new_state:
+                return
+            old = self._state
+            self._state = new_state
+            self._state_condition.notify_all()
+        logger.info("Connection %s: %s → %s", self.target, old.value, new_state.value)
+        if self._on_state_change is not None:
+            try:
+                self._on_state_change(new_state)
+            except Exception:
+                logger.exception("on_state_change callback error")
+
+    def _health_check_loop(self, interval: float) -> None:
+        """Daemon thread: ping periodically, update state."""
+        while not self._monitor_stop.wait(timeout=interval):
+            result = self.ping()
+            if result["ok"]:
+                self._set_state(ConnectionState.CONNECTED)
+            else:
+                self._set_state(ConnectionState.DISCONNECTED)
 
     # ── Internal ─────────────────────────────────────────────────────
 

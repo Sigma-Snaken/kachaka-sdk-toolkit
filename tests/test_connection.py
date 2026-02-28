@@ -1,12 +1,15 @@
-"""Tests for kachaka_core.connection — pool, normalisation, ping."""
+"""Tests for kachaka_core.connection — pool, normalisation, ping, monitoring."""
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
+import grpc
 import pytest
 
-from kachaka_core.connection import KachakaConnection
+from kachaka_core.connection import ConnectionState, KachakaConnection
 
 
 @pytest.fixture(autouse=True)
@@ -159,3 +162,125 @@ class TestResolver:
         assert conn.resolve_location("Kitchen") == "L01"
         assert conn.resolve_location("L01") == "L01"
         assert conn.resolve_location("unknown") == "unknown"
+
+
+class TestMonitoring:
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_state_initially_connected(self, mock_cls):
+        mock_cls.return_value = MagicMock()
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn.state == ConnectionState.CONNECTED
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_no_monitoring_by_default(self, mock_cls):
+        mock_cls.return_value = MagicMock()
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn._monitor_thread is None
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_monitoring_detects_disconnect(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        # Make ping fail
+        rpc_error = grpc.RpcError()
+        rpc_error.code = lambda: grpc.StatusCode.UNAVAILABLE
+        rpc_error.details = lambda: "gone"
+        mock_client.get_robot_serial_number.side_effect = rpc_error
+
+        conn.start_monitoring(interval=0.05)
+        try:
+            reached = conn.wait_for_state(ConnectionState.DISCONNECTED, timeout=2.0)
+            assert reached
+            assert conn.state == ConnectionState.DISCONNECTED
+        finally:
+            conn.stop_monitoring()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_monitoring_detects_reconnect(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+
+        # Start disconnected
+        rpc_error = grpc.RpcError()
+        rpc_error.code = lambda: grpc.StatusCode.UNAVAILABLE
+        rpc_error.details = lambda: "gone"
+        mock_client.get_robot_serial_number.side_effect = rpc_error
+
+        conn.start_monitoring(interval=0.05)
+        try:
+            conn.wait_for_state(ConnectionState.DISCONNECTED, timeout=2.0)
+
+            # Restore connection
+            mock_client.get_robot_serial_number.side_effect = None
+            mock_client.get_robot_serial_number.return_value = "KCK-001"
+            mock_client.get_robot_pose.return_value = MagicMock(x=0, y=0, theta=0)
+
+            reached = conn.wait_for_state(ConnectionState.CONNECTED, timeout=2.0)
+            assert reached
+            assert conn.state == ConnectionState.CONNECTED
+        finally:
+            conn.stop_monitoring()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_state_change_callback_called(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        transitions = []
+
+        rpc_error = grpc.RpcError()
+        rpc_error.code = lambda: grpc.StatusCode.UNAVAILABLE
+        rpc_error.details = lambda: "gone"
+        mock_client.get_robot_serial_number.side_effect = rpc_error
+
+        conn.start_monitoring(interval=0.05, on_state_change=transitions.append)
+        try:
+            conn.wait_for_state(ConnectionState.DISCONNECTED, timeout=2.0)
+            assert ConnectionState.DISCONNECTED in transitions
+        finally:
+            conn.stop_monitoring()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_stop_monitoring_cleans_up(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.return_value = "KCK-001"
+        mock_client.get_robot_pose.return_value = MagicMock(x=0, y=0, theta=0)
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        conn.start_monitoring(interval=0.05)
+        assert conn._monitor_thread is not None
+        conn.stop_monitoring()
+        assert conn._monitor_thread is None
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_wait_for_state_timeout(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.return_value = "KCK-001"
+        mock_client.get_robot_pose.return_value = MagicMock(x=0, y=0, theta=0)
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        # Don't start monitoring — state stays CONNECTED
+        reached = conn.wait_for_state(ConnectionState.DISCONNECTED, timeout=0.1)
+        assert reached is False
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_start_monitoring_idempotent(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.return_value = "KCK-001"
+        mock_client.get_robot_pose.return_value = MagicMock(x=0, y=0, theta=0)
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        conn.start_monitoring(interval=0.1)
+        thread1 = conn._monitor_thread
+        conn.start_monitoring(interval=0.1)
+        thread2 = conn._monitor_thread
+        assert thread1 is thread2
+        conn.stop_monitoring()
