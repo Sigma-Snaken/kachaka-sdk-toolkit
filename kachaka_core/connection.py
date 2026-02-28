@@ -16,6 +16,9 @@ from typing import Optional
 
 import grpc
 from kachaka_api import KachakaApiClient
+from kachaka_api.generated.kachaka_api_pb2_grpc import KachakaApiStub
+
+from kachaka_core.interceptors import TimeoutInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +156,17 @@ class KachakaConnection:
                 return
             logger.info("Connecting to Kachaka at %s …", self.target)
             self._client = KachakaApiClient(self.target)
+
+            # Replace the SDK's plain channel with one that has a timeout
+            # interceptor.  The SDK never sets per-call timeouts, so without
+            # this, any gRPC call can block indefinitely on server-side
+            # disconnects (e.g. robot WiFi drop — measured 522s in testing).
+            intercepted_channel = grpc.intercept_channel(
+                grpc.insecure_channel(self.target),
+                TimeoutInterceptor(self.timeout),
+            )
+            self._client.stub = KachakaApiStub(intercepted_channel)
+
             # Lightweight connectivity check (same as visual-patrol)
             try:
                 self._client.get_robot_serial_number()
