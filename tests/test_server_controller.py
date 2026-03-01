@@ -14,6 +14,7 @@ if "mcp" not in sys.modules:
     _mcp_mod = ModuleType("mcp")
     _mcp_server_mod = ModuleType("mcp.server")
     _mcp_fastmcp_mod = ModuleType("mcp.server.fastmcp")
+    _mcp_types_mod = ModuleType("mcp.types")
 
     class _FakeFastMCP:
         def __init__(self, *a, **kw): pass
@@ -22,12 +23,22 @@ if "mcp" not in sys.modules:
             return lambda fn: fn
         def run(self, **kw): pass
 
+    class _FakeImage:
+        def __init__(self, *a, **kw): pass
+
+    class _FakeTextContent:
+        def __init__(self, *a, **kw): pass
+
     _mcp_fastmcp_mod.FastMCP = _FakeFastMCP
+    _mcp_fastmcp_mod.Image = _FakeImage
+    _mcp_types_mod.TextContent = _FakeTextContent
     _mcp_mod.server = _mcp_server_mod
+    _mcp_mod.types = _mcp_types_mod
     _mcp_server_mod.fastmcp = _mcp_fastmcp_mod
     sys.modules["mcp"] = _mcp_mod
     sys.modules["mcp.server"] = _mcp_server_mod
     sys.modules["mcp.server.fastmcp"] = _mcp_fastmcp_mod
+    sys.modules["mcp.types"] = _mcp_types_mod
 
 from kachaka_core.connection import KachakaConnection
 from kachaka_core.controller import RobotController

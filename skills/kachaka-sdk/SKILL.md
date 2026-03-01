@@ -149,24 +149,25 @@ image = Image.open(io.BytesIO(data))
 image.save("snapshot.jpg")
 ```
 
-### MCP save_path (recommended for MCP tool calls)
+### MCP tools return native images
 
-The MCP tools `capture_front_camera` and `capture_back_camera` accept an optional
-`save_path` parameter. When provided, the image is written to disk and only the
-file path + size are returned — avoiding the large base64 output that can exceed
-MCP token limits.
+The MCP camera tools (`capture_front_camera`, `capture_back_camera`,
+`get_camera_frame`, `capture_with_detection`, `get_map`) return images using
+MCP's native `ImageContent` type. Claude can see the images directly inline
+— no `save_path` or base64 decoding needed.
 
 ```python
-# MCP tool call with save_path
-capture_front_camera(ip="192.168.1.100", save_path="/tmp/kachaka_front.jpg")
-# {"ok": True, "path": "/tmp/kachaka_front.jpg", "size_bytes": 143659}
+# MCP tool call — Claude sees the image directly
+capture_front_camera(ip="192.168.1.100")
+# → ImageContent(type="image", data="<base64>", mimeType="image/jpeg")
 
-# Then use Read tool to view the image directly (Claude Code natively displays images)
+# Tools with metadata return [Image, TextContent]:
+capture_with_detection(ip="192.168.1.100")
+# → [ImageContent(...), TextContent(text='{"objects": [...], "annotated": true}')]
+
+get_map(ip="192.168.1.100")
+# → [ImageContent(...), TextContent(text='{"format": "png", "name": "...", ...}')]
 ```
-
-**When to use which:**
-- `save_path="/tmp/..."` — MCP conversations where the model needs to see the image (avoids token overflow)
-- No `save_path` — programmatic use where you need the raw base64 in code
 
 ## RobotController (Background Polling + Non-blocking Commands)
 

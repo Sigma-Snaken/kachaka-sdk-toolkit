@@ -9,9 +9,12 @@ Transport: stdio (default for Claude Desktop / Claude Code).
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+from mcp.types import TextContent
 
 from kachaka_core.commands import KachakaCommands
 from kachaka_core.camera import CameraStreamer
@@ -319,40 +322,28 @@ def get_last_result(ip: str) -> dict:
 # ── Camera ───────────────────────────────────────────────────────────
 
 
-def _save_image(result: dict, save_path: str) -> dict:
-    """Decode base64 image and write to disk. Returns path + size."""
-    import base64
-
-    img_bytes = base64.b64decode(result["image_base64"])
-    with open(save_path, "wb") as f:
-        f.write(img_bytes)
-    return {"ok": True, "path": save_path, "size_bytes": len(img_bytes)}
-
-
 @mcp.tool()
-def capture_front_camera(ip: str, save_path: str = "") -> dict:
-    """Capture a JPEG from the front camera (returned as base64).
+def capture_front_camera(ip: str):
+    """Capture a JPEG from the front camera.
 
-    If save_path is provided, the image is saved to that path and only the
-    file path + size are returned (avoids large base64 output).
+    Returns the image directly — Claude can see it inline.
     """
     result = KachakaQueries(KachakaConnection.get(ip)).get_front_camera_image()
-    if result["ok"] and save_path:
-        return _save_image(result, save_path)
-    return result
+    if not result["ok"]:
+        return result
+    return Image(data=base64.b64decode(result["image_base64"]), format="jpeg")
 
 
 @mcp.tool()
-def capture_back_camera(ip: str, save_path: str = "") -> dict:
-    """Capture a JPEG from the back camera (returned as base64).
+def capture_back_camera(ip: str):
+    """Capture a JPEG from the back camera.
 
-    If save_path is provided, the image is saved to that path and only the
-    file path + size are returned (avoids large base64 output).
+    Returns the image directly — Claude can see it inline.
     """
     result = KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image()
-    if result["ok"] and save_path:
-        return _save_image(result, save_path)
-    return result
+    if not result["ok"]:
+        return result
+    return Image(data=base64.b64decode(result["image_base64"]), format="jpeg")
 
 
 # ── Camera streaming ────────────────────────────────────────────────
@@ -391,9 +382,11 @@ def start_camera_stream(
 
 
 @mcp.tool()
-def get_camera_frame(ip: str, camera: str = "front") -> dict:
+def get_camera_frame(ip: str, camera: str = "front"):
     """Get the latest frame from a running camera stream.
 
+    Returns the image directly — Claude can see it inline.
+    When detection is enabled, also returns detected objects as text.
     Must call ``start_camera_stream`` first.
     """
     key = _streamer_key(ip, camera)
@@ -403,7 +396,11 @@ def get_camera_frame(ip: str, camera: str = "front") -> dict:
     frame = streamer.latest_frame
     if frame is None:
         return {"ok": False, "error": "no frame captured yet — try again shortly"}
-    return frame
+    img = Image(data=base64.b64decode(frame["image_base64"]), format="jpeg")
+    if frame.get("objects"):
+        return [img, TextContent(type="text", text=json.dumps(
+            {"objects": frame["objects"]}, ensure_ascii=False))]
+    return img
 
 
 @mcp.tool()
@@ -441,40 +438,47 @@ def get_object_detection(ip: str) -> dict:
 
 @mcp.tool()
 def capture_with_detection(
-    ip: str, camera: str = "front", annotate: bool = True, save_path: str = ""
-) -> dict:
+    ip: str, camera: str = "front", annotate: bool = True,
+):
     """Capture camera image with object detection overlay.
 
     When annotate=True, bounding boxes are drawn on the image.
-    Returns both the image (base64) and detection results.
-
-    If save_path is provided, the image is saved to that path and the
-    base64 payload is replaced with the file path (avoids large output).
-    Detection results (objects list) are always included.
+    Returns the image (Claude can see it inline) and detection results as text.
     """
     from kachaka_core.detection import ObjectDetector
-    import base64
     detector = ObjectDetector(KachakaConnection.get(ip))
     result = detector.capture_with_detections(camera=camera)
-    if result["ok"] and annotate and result.get("objects"):
+    if not result["ok"]:
+        return result
+    if annotate and result.get("objects"):
         raw = base64.b64decode(result["image_base64"])
-        annotated = detector.annotate_frame(raw, result["objects"])
-        result["image_base64"] = base64.b64encode(annotated).decode()
-        result["annotated"] = True
-    if result["ok"] and save_path:
-        saved = _save_image(result, save_path)
-        saved["objects"] = result.get("objects", [])
-        saved["annotated"] = result.get("annotated", False)
-        return saved
-    return result
+        img_bytes = detector.annotate_frame(raw, result["objects"])
+    else:
+        img_bytes = base64.b64decode(result["image_base64"])
+    meta = {"objects": result.get("objects", []), "annotated": annotate}
+    return [
+        Image(data=img_bytes, format="jpeg"),
+        TextContent(type="text", text=json.dumps(meta, ensure_ascii=False)),
+    ]
 
 
 # ── Map ──────────────────────────────────────────────────────────────
 
 @mcp.tool()
-def get_map(ip: str) -> dict:
-    """Current map as base64 PNG with metadata."""
-    return KachakaQueries(KachakaConnection.get(ip)).get_map()
+def get_map(ip: str):
+    """Current map as PNG image with metadata.
+
+    Returns the map image (Claude can see it inline) and metadata as text.
+    """
+    result = KachakaQueries(KachakaConnection.get(ip)).get_map()
+    if not result["ok"]:
+        return result
+    img_bytes = base64.b64decode(result["image_base64"])
+    meta = {k: v for k, v in result.items() if k not in ("ok", "image_base64")}
+    return [
+        Image(data=img_bytes, format="png"),
+        TextContent(type="text", text=json.dumps(meta, ensure_ascii=False)),
+    ]
 
 
 @mcp.tool()
