@@ -318,16 +318,41 @@ def get_last_result(ip: str) -> dict:
 
 # ── Camera ───────────────────────────────────────────────────────────
 
-@mcp.tool()
-def capture_front_camera(ip: str) -> dict:
-    """Capture a JPEG from the front camera (returned as base64)."""
-    return KachakaQueries(KachakaConnection.get(ip)).get_front_camera_image()
+
+def _save_image(result: dict, save_path: str) -> dict:
+    """Decode base64 image and write to disk. Returns path + size."""
+    import base64
+
+    img_bytes = base64.b64decode(result["image_base64"])
+    with open(save_path, "wb") as f:
+        f.write(img_bytes)
+    return {"ok": True, "path": save_path, "size_bytes": len(img_bytes)}
 
 
 @mcp.tool()
-def capture_back_camera(ip: str) -> dict:
-    """Capture a JPEG from the back camera (returned as base64)."""
-    return KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image()
+def capture_front_camera(ip: str, save_path: str = "") -> dict:
+    """Capture a JPEG from the front camera (returned as base64).
+
+    If save_path is provided, the image is saved to that path and only the
+    file path + size are returned (avoids large base64 output).
+    """
+    result = KachakaQueries(KachakaConnection.get(ip)).get_front_camera_image()
+    if result["ok"] and save_path:
+        return _save_image(result, save_path)
+    return result
+
+
+@mcp.tool()
+def capture_back_camera(ip: str, save_path: str = "") -> dict:
+    """Capture a JPEG from the back camera (returned as base64).
+
+    If save_path is provided, the image is saved to that path and only the
+    file path + size are returned (avoids large base64 output).
+    """
+    result = KachakaQueries(KachakaConnection.get(ip)).get_back_camera_image()
+    if result["ok"] and save_path:
+        return _save_image(result, save_path)
+    return result
 
 
 # ── Camera streaming ────────────────────────────────────────────────
