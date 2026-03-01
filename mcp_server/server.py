@@ -440,11 +440,17 @@ def get_object_detection(ip: str) -> dict:
 
 
 @mcp.tool()
-def capture_with_detection(ip: str, camera: str = "front", annotate: bool = True) -> dict:
+def capture_with_detection(
+    ip: str, camera: str = "front", annotate: bool = True, save_path: str = ""
+) -> dict:
     """Capture camera image with object detection overlay.
 
     When annotate=True, bounding boxes are drawn on the image.
     Returns both the image (base64) and detection results.
+
+    If save_path is provided, the image is saved to that path and the
+    base64 payload is replaced with the file path (avoids large output).
+    Detection results (objects list) are always included.
     """
     from kachaka_core.detection import ObjectDetector
     import base64
@@ -455,6 +461,11 @@ def capture_with_detection(ip: str, camera: str = "front", annotate: bool = True
         annotated = detector.annotate_frame(raw, result["objects"])
         result["image_base64"] = base64.b64encode(annotated).decode()
         result["annotated"] = True
+    if result["ok"] and save_path:
+        saved = _save_image(result, save_path)
+        saved["objects"] = result.get("objects", [])
+        saved["annotated"] = result.get("annotated", False)
+        return saved
     return result
 
 
