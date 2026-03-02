@@ -172,6 +172,12 @@ class CameraStreamer:
             capture_fn = sdk.get_back_camera_ros_compressed_image
 
         while not self._stop_event.is_set():
+            # Skip capture while disconnected — avoids wasting 5s per
+            # call on the interceptor timeout.
+            if self._conn.state == ConnectionState.DISCONNECTED:
+                self._stop_event.wait(self._interval)
+                continue
+
             self._total_frames += 1
             try:
                 img = capture_fn()

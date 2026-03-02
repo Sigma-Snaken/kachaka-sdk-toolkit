@@ -203,6 +203,12 @@ class RobotController:
         last_slow = 0.0
 
         while not self._stop_event.is_set():
+            # Skip polling while disconnected — avoids wasting 5s per
+            # call on the interceptor timeout.
+            if self._conn.state == ConnectionState.DISCONNECTED:
+                self._stop_event.wait(self._fast_interval)
+                continue
+
             now = time.time()
 
             # Fast cycle: pose + command state
