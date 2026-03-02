@@ -60,6 +60,8 @@ KachakaConnection.remove("192.168.1.100")
 - Subsequent calls return the cached instance
 - Thread-safe via internal locking
 - Resolver supports both name and ID lookups (bio-patrol pattern)
+- **TimeoutInterceptor** (5s default) is installed on every connection — all unary gRPC calls get a 5s deadline to prevent indefinite blocking during network loss
+- Customise timeout: `KachakaConnection.get("192.168.1.100", timeout=10.0)`
 
 ## Movement Commands
 
@@ -247,6 +249,32 @@ result = ctrl.move_to_location("nonexistent")
 - **Concurrent commands**: One wins, the other gets TIMEOUT (its command_id never appears in GetLastCommandResult)
 - **Short timeout + new command**: Robot keeps moving after controller timeout; `cancel_all=True` (default) on the new command cancels the residual movement
 - **No deadlock observed** — concurrent use is unsafe but not catastrophic; no execution lock needed
+
+### Network resilience (disconnect → auto-recovery)
+
+Five layers protect against network loss:
+
+1. **TimeoutInterceptor (5s)** — every unary gRPC call gets a 5s deadline. Without this, calls block 15–18 minutes waiting for TCP timeout.
+2. **`@with_retry`** — retries `DEADLINE_EXCEEDED` / `UNAVAILABLE` / `RESOURCE_EXHAUSTED` with exponential backoff. Count mode (N attempts) or deadline mode (retry until wall-clock limit).
+3. **ConnectionState monitoring** — `conn.start_monitoring(interval=3.0)` runs a background ping; fires `on_state_change` callback on `CONNECTED ↔ DISCONNECTED` transitions. Detection latency ~7s.
+4. **RobotController** — `_state_loop` skips polling while `DISCONNECTED` (avoids wasting 5s per call on the interceptor timeout). `_execute_command` calls `conn.wait_for_state(CONNECTED)` before sending commands; retries `StartCommand` until deadline.
+5. **CameraStreamer** — `_run` loop skips capture while `DISCONNECTED`. Records `recovery_latency_ms` on first successful capture after reconnect.
+
+Disconnect → recovery timeline:
+
+```
+T+0s    Network lost
+T+0~5s  In-flight gRPC call hits 5s interceptor timeout → DEADLINE_EXCEEDED
+T+~7s   ConnectionState detects DISCONNECTED (ping interval)
+        → RobotController + CameraStreamer skip polling/capture
+T+Ns    Network restored
+T+N+0.2s ConnectionState detects CONNECTED
+         → RobotController._reconnect_probe() refreshes pose/battery
+         → CameraStreamer records recovery timestamp
+T+N+1s  Next poll/capture iteration succeeds normally
+```
+
+**Important**: gRPC channel survives all disconnect types (client-side iptables, server-side WiFi drop) — no channel rebuild needed.
 
 ### Other notes
 
