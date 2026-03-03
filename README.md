@@ -902,6 +902,8 @@ def my_new_command(ip: str, param: str) -> dict:
 
 ## License
 
-MIT License. Copyright 2025-present Sigma Robotics.
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+Copyright 2025-2026 Sigma Robotics
 
 This project wraps the [kachaka-api](https://github.com/pf-robotics/kachaka-api) SDK. Refer to that project for SDK licensing terms.
