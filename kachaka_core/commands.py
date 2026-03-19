@@ -147,6 +147,32 @@ class KachakaCommands:
         return self._result_to_dict(result, action="dock_shelf")
 
     @with_retry()
+    def dock_any_shelf_with_registration(
+        self,
+        location_name: str,
+        dock_forward: bool = False,
+        *,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+    ) -> dict:
+        """Move to *location_name* and dock any shelf placed there. Registers unregistered shelves automatically."""
+        self.conn.ensure_resolver()
+        location_id = self.conn.resolve_location(location_name)
+        result = self.sdk.dock_any_shelf_with_registration(
+            location_id,
+            dock_forward,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+        )
+        return self._result_to_dict(
+            result,
+            action="dock_any_shelf_with_registration",
+            target=location_name,
+        )
+
+    @with_retry()
     def undock_shelf(self, **kwargs) -> dict:
         """Undock the currently held shelf."""
         result = self.sdk.undock_shelf(**kwargs)
@@ -186,6 +212,21 @@ class KachakaCommands:
         volume = max(0, min(10, volume))
         result = self.sdk.set_speaker_volume(volume)
         return self._result_to_dict(result, action="set_speaker_volume", target=str(volume))
+
+    # ── Shortcuts ─────────────────────────────────────────────────────
+
+    @with_retry()
+    def start_shortcut(
+        self,
+        shortcut_id: str,
+        *,
+        cancel_all: bool = True,
+    ) -> dict:
+        """Execute a registered shortcut by its ID."""
+        result = self.sdk.start_shortcut_command(
+            shortcut_id, cancel_all=cancel_all,
+        )
+        return self._result_to_dict(result, action="start_shortcut", target=shortcut_id)
 
     # ── Command control ──────────────────────────────────────────────
 

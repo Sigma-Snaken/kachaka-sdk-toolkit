@@ -170,6 +170,19 @@ def undock_shelf(ip: str) -> dict:
 
 
 @mcp.tool()
+def dock_any_shelf_with_registration(
+    ip: str, location_name: str, dock_forward: bool = False
+) -> dict:
+    """Move to a location and dock any shelf placed there. If the shelf is unregistered, it is automatically registered as new.
+
+    dock_forward: if True the robot approaches the shelf head-first (default False = tail-first).
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).dock_any_shelf_with_registration(
+        location_name, dock_forward
+    )
+
+
+@mcp.tool()
 def reset_shelf_pose(ip: str, shelf_name: str) -> dict:
     """Reset the recorded pose of a shelf (by name or ID)."""
     return KachakaCommands(KachakaConnection.get(ip)).reset_shelf_pose(shelf_name)
@@ -493,6 +506,15 @@ def list_maps(ip: str) -> dict:
 def list_shortcuts(ip: str) -> dict:
     """All registered shortcuts (id -> name)."""
     return KachakaQueries(KachakaConnection.get(ip)).list_shortcuts()
+
+
+@mcp.tool()
+def start_shortcut(ip: str, shortcut_id: str) -> dict:
+    """Execute a registered shortcut by its ID.
+
+    Use ``list_shortcuts`` first to see available shortcut IDs and names.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).start_shortcut(shortcut_id)
 
 
 # ── History ──────────────────────────────────────────────────────────

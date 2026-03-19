@@ -101,6 +101,29 @@ class TestShelfOps:
         result = KachakaCommands(conn).dock_shelf()
         assert result["ok"] is True
 
+    def test_dock_any_shelf_with_registration(self):
+        mock_client = MagicMock()
+        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).dock_any_shelf_with_registration("L01")
+        assert result["ok"] is True
+        assert result["action"] == "dock_any_shelf_with_registration"
+        assert result["target"] == "L01"
+        mock_client.dock_any_shelf_with_registration.assert_called_once()
+
+    def test_dock_any_shelf_with_registration_forward(self):
+        mock_client = MagicMock()
+        mock_client.dock_any_shelf_with_registration.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).dock_any_shelf_with_registration(
+            "L01", dock_forward=True
+        )
+        assert result["ok"] is True
+        args, kwargs = mock_client.dock_any_shelf_with_registration.call_args
+        assert args[1] is True  # dock_forward
+
     def test_reset_shelf_pose(self):
         mock_client = MagicMock()
         mock_client.reset_shelf_pose.return_value = _make_result(True)
@@ -179,6 +202,30 @@ class TestRetry:
         assert result["ok"] is False
         assert result["retryable"] is True
         assert result["attempts"] == 3
+
+
+class TestShortcut:
+    def test_start_shortcut_success(self):
+        mock_client = MagicMock()
+        mock_client.start_shortcut_command.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).start_shortcut("abc-123")
+        assert result["ok"] is True
+        assert result["action"] == "start_shortcut"
+        assert result["target"] == "abc-123"
+        mock_client.start_shortcut_command.assert_called_once_with(
+            "abc-123", cancel_all=True
+        )
+
+    def test_start_shortcut_failure(self):
+        mock_client = MagicMock()
+        mock_client.start_shortcut_command.return_value = _make_result(False, error_code=12506)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).start_shortcut("bad-id")
+        assert result["ok"] is False
+        assert result["error_code"] == 12506
 
 
 class TestCancelCommand:
