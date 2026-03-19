@@ -223,7 +223,11 @@ class RobotController:
                     self._state.pose_y = pose.y
                     self._state.pose_theta = pose.theta
                     self._state.is_command_running = is_running
-                    self._state.moving_shelf_id = moving_shelf
+                    # Only update moving_shelf_id when shelf monitor is NOT active.
+                    # During _execute_command, the shelf monitor in the polling loop
+                    # owns this field to detect drops without race conditions.
+                    if not self._monitoring_shelf:
+                        self._state.moving_shelf_id = moving_shelf
                     self._state.last_updated = now
             except Exception:
                 logger.debug("State poll (fast) error", exc_info=True)
