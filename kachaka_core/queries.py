@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import math
+
+from kachaka_api.generated import kachaka_api_pb2 as pb2
 
 from .connection import KachakaConnection
 from .error_handling import with_retry
@@ -258,3 +261,62 @@ class KachakaQueries:
                 for h in history
             ],
         }
+
+    # ── Readiness ─────────────────────────────────────────────────────
+
+    @with_retry()
+    def is_ready(self) -> dict:
+        """Check if the robot is ready to accept commands.
+
+        This gRPC RPC is not wrapped by the official Python SDK.
+        Always returns immediately (non-blocking).
+        """
+        request = pb2.EmptyRequest()
+        response = self.sdk.stub.IsReady(request)
+        return {"ok": True, "ready": response.ready}
+
+    # ── Auto homing ──────────────────────────────────────────────────
+
+    @with_retry()
+    def get_auto_homing_enabled(self) -> dict:
+        """Whether the robot automatically returns to the charger when idle."""
+        enabled = self.sdk.get_auto_homing_enabled()
+        return {"ok": True, "enabled": enabled}
+
+    # ── Manual control status ─────────────────────────────────────────
+
+    @with_retry()
+    def get_manual_control_enabled(self) -> dict:
+        """Whether manual velocity control mode is currently active."""
+        enabled = self.sdk.get_manual_control_enabled()
+        return {"ok": True, "enabled": enabled}
+
+    # ── Transforms ───────────────────────────────────────────────────
+
+    @with_retry()
+    def get_static_transform(self) -> dict:
+        """Static TF transforms (e.g. base_link -> camera_link).
+
+        This gRPC RPC is not wrapped by the official Python SDK.
+        Useful for sensor fusion and custom navigation.
+        """
+        request = pb2.GetRequest()
+        response = self.sdk.stub.GetStaticTransform(request)
+        transforms = []
+        for tf in response.transforms:
+            rx, ry, rz, rw = tf.rotation.x, tf.rotation.y, tf.rotation.z, tf.rotation.w
+            siny_cosp = 2.0 * (rw * rz + rx * ry)
+            cosy_cosp = 1.0 - 2.0 * (ry * ry + rz * rz)
+            theta = math.atan2(siny_cosp, cosy_cosp)
+            transforms.append({
+                "frame_id": tf.header.frame_id,
+                "child_frame_id": tf.child_frame_id,
+                "translation": {
+                    "x": tf.translation.x,
+                    "y": tf.translation.y,
+                    "z": tf.translation.z,
+                },
+                "rotation": {"x": rx, "y": ry, "z": rz, "w": rw},
+                "theta": theta,
+            })
+        return {"ok": True, "transforms": transforms}

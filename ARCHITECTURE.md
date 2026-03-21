@@ -6,19 +6,19 @@ This document describes the internal architecture of `kachaka-sdk-toolkit`. For 
 
 The toolkit is a layered wrapper around the [kachaka-api](https://github.com/pf-robotics/kachaka-api) gRPC SDK for Kachaka robots. It provides three consumer-facing surfaces -- an MCP Server, a Skill document, and a direct Python API -- all sharing a single core library (`kachaka_core`).
 
-The design goal is **one code path for all consumers**. The MCP Server's 47 tools are thin one-liner delegations to `kachaka_core`, so behaviour tested through the Python API is identical to behaviour observed through the MCP Server.
+The design goal is **one code path for all consumers**. The MCP Server's 53 tools are thin one-liner delegations to `kachaka_core`, so behaviour tested through the Python API is identical to behaviour observed through the MCP Server.
 
 ```mermaid
 graph TD
     subgraph Consumers
-        MCP["MCP Server<br/>(47 tools, stdio)"]
+        MCP["MCP Server<br/>(53 tools, stdio)"]
         SKILL["Skill .md<br/>(LLM reference)"]
         APP["Your Script<br/>or App"]
     end
 
     subgraph kachaka_core["kachaka_core (shared core)"]
         CONN["connection.py<br/>Pool mgmt · Health check<br/>Resolver · Normalise"]
-        CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Manual"]
+        CMD["commands.py<br/>Movement · Shelf ops<br/>Speech · Map mgmt · Manual"]
         QRY["queries.py<br/>Status · Locations<br/>Camera · Map"]
         ERR["error_handling.py<br/>@with_retry · format_grpc_error<br/>Exponential backoff"]
         CAM["camera.py<br/>CameraStreamer (daemon thread)<br/>Detection overlay · Stats"]
@@ -66,7 +66,9 @@ graph TD
 
 **Key responsibilities**:
 - Movement: `move_to_location`, `move_to_pose`, `move_forward`, `rotate_in_place`, `return_home`
-- Shelf ops: `move_shelf`, `return_shelf`, `dock_shelf`, `undock_shelf`, `reset_shelf_pose`
+- Shelf ops: `move_shelf`, `return_shelf`, `dock_shelf`, `undock_shelf`, `dock_any_shelf_with_registration`, `reset_shelf_pose`
+- Shortcuts: `start_shortcut` -- execute registered shortcuts by ID
+- Map management: `export_map`, `import_map`, `import_image_as_map` -- backup, restore, and create maps from ROS-style PNG occupancy grids. `import_image_as_map` bypasses the SDK wrapper and calls `stub.ImportImageAsMap()` directly via gRPC `stream_unary` for chunked image upload.
 - Speech: `speak`, `set_speaker_volume`
 - Control: `cancel_command`, `proceed`, `set_manual_control`, `set_velocity`, `stop`
 - `poll_until_complete(timeout)` blocks until the current command finishes.
@@ -83,7 +85,7 @@ graph TD
 - Status: `get_status`, `get_pose`, `get_battery`, `get_errors`, `get_serial_number`, `get_version`
 - Assets: `list_locations`, `list_shelves`, `get_moving_shelf`, `list_shortcuts`, `get_history`
 - Camera: `get_front_camera_image`, `get_back_camera_image`
-- Map: `get_map`, `list_maps`
+- Map (read-only): `get_map`, `list_maps`
 - Command: `get_command_state`, `get_last_command_result`, `get_speaker_volume`
 
 **Internal dependencies**: `connection.py`, `error_handling.py`.
@@ -131,7 +133,7 @@ graph TD
 
 **Key responsibilities**:
 - Background thread continuously reads pose, battery, and command state.
-- `move_to_location`, `return_home`, `move_shelf`, `return_shelf` execute with deadline-based retry and `command_id` verification.
+- `move_to_location`, `return_home`, `move_shelf`, `return_shelf`, `dock_any_shelf_with_registration` execute with deadline-based retry and `command_id` verification.
 - `ControllerMetrics` collects poll RTT, success/failure counts.
 - Shelf drop monitoring: `move_shelf` auto-starts monitoring, `return_shelf` auto-stops.
 
@@ -179,7 +181,7 @@ sequenceDiagram
 
 ### mcp_server/server.py -- MCP Server
 
-**Purpose**: Expose `kachaka_core` as 47 MCP tools over stdio transport.
+**Purpose**: Expose `kachaka_core` as 53 MCP tools over stdio transport.
 
 **Key responsibilities**:
 - Each `@mcp.tool()` function is a thin delegation to `kachaka_core`.
@@ -205,7 +207,7 @@ stateDiagram-v2
     }
 ```
 
-**Tool categories** (47 total):
+**Tool categories** (53 total):
 
 | Category | Count | Core module |
 |----------|-------|-------------|
@@ -213,14 +215,14 @@ stateDiagram-v2
 | Status Queries | 6 | `queries.py` |
 | Locations and Shelves | 3 | `queries.py` |
 | Movement | 5 | `commands.py` |
-| Shelf Operations | 5 | `commands.py` |
+| Shelf Operations | 6 | `commands.py` |
 | Speech | 3 | `commands.py` / `queries.py` |
 | Command Control | 2 | `commands.py` / `queries.py` |
 | Camera | 6 | `camera.py` / `queries.py` |
 | Object Detection | 2 | `detection.py` |
-| Controller | 6 | `controller.py` |
-| Map | 2 | `queries.py` |
-| Other | 5 | `commands.py` / `queries.py` |
+| Controller | 7 | `controller.py` |
+| Map | 5 | `queries.py` / `commands.py` |
+| Other | 6 | `commands.py` / `queries.py` |
 
 ## Data Model
 

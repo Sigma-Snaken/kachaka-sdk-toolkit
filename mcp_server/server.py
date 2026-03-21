@@ -21,6 +21,7 @@ from kachaka_core.camera import CameraStreamer
 from kachaka_core.connection import KachakaConnection
 from kachaka_core.controller import RobotController
 from kachaka_core.queries import KachakaQueries
+from kachaka_core.transform import TransformStreamer
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -146,9 +147,20 @@ def return_home(ip: str) -> dict:
 # ── Shelf operations ─────────────────────────────────────────────────
 
 @mcp.tool()
-def move_shelf(ip: str, shelf_name: str, location_name: str) -> dict:
-    """Pick up a shelf and deliver it to a location (by name or ID)."""
-    return KachakaCommands(KachakaConnection.get(ip)).move_shelf(shelf_name, location_name)
+def move_shelf(
+    ip: str,
+    shelf_name: str,
+    location_name: str,
+    undock_on_destination: bool = False,
+) -> dict:
+    """Pick up a shelf and deliver it to a location (by name or ID).
+
+    undock_on_destination: if True, automatically undock the shelf at the
+    destination instead of staying docked.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).move_shelf(
+        shelf_name, location_name, undock_on_destination=undock_on_destination,
+    )
 
 
 @mcp.tool()
@@ -516,6 +528,70 @@ def list_maps(ip: str) -> dict:
     return KachakaQueries(KachakaConnection.get(ip)).list_maps()
 
 
+@mcp.tool()
+def export_map(ip: str, map_id: str, output_path: str) -> dict:
+    """Export a map to a binary file (Kachaka proprietary format).
+
+    Use ``list_maps`` to find available map IDs.
+    The file can be re-imported later with ``import_map``.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).export_map(map_id, output_path)
+
+
+@mcp.tool()
+def import_map(ip: str, file_path: str) -> dict:
+    """Import a map from a previously exported binary file.
+
+    The file must have been created by ``export_map``.
+    Returns the new map ID assigned by the robot.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).import_map(file_path)
+
+
+@mcp.tool()
+def switch_map(
+    ip: str,
+    map_id: str,
+    pose_x: float | None = None,
+    pose_y: float | None = None,
+    pose_theta: float | None = None,
+    inherit_docking_state: bool = False,
+) -> dict:
+    """Switch the robot to a different map.
+
+    Use ``list_maps`` first to find available map IDs.
+    Optionally specify an initial pose (x, y, theta).
+    When no pose is given, the charger pose of the target map is used.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).switch_map(
+        map_id,
+        pose_x=pose_x,
+        pose_y=pose_y,
+        pose_theta=pose_theta,
+        inherit_docking_state=inherit_docking_state,
+    )
+
+
+@mcp.tool()
+def import_image_as_map(
+    ip: str,
+    image_path: str,
+    resolution: float,
+    charger_x: float,
+    charger_y: float,
+    charger_theta: float = 0.0,
+) -> dict:
+    """Import a PNG occupancy grid image as a new map (ROS-style format).
+
+    The image should be a grayscale PNG where white=free, black=wall, gray=unknown.
+    ``resolution`` is meters per pixel (e.g. 0.025 = 2.5cm/px).
+    Charger pose (x, y, theta) specifies the charging dock position in world coordinates.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).import_image_as_map(
+        image_path, resolution, charger_x, charger_y, charger_theta,
+    )
+
+
 # ── Shortcuts ────────────────────────────────────────────────────────
 
 @mcp.tool()
@@ -544,9 +620,16 @@ def get_history(ip: str) -> dict:
 # ── Manual control ───────────────────────────────────────────────────
 
 @mcp.tool()
-def enable_manual_control(ip: str, enabled: bool) -> dict:
-    """Enable or disable manual velocity control mode."""
-    return KachakaCommands(KachakaConnection.get(ip)).set_manual_control(enabled)
+def enable_manual_control(
+    ip: str, enabled: bool, use_shelf_registration: bool = False,
+) -> dict:
+    """Enable or disable manual velocity control mode.
+
+    use_shelf_registration: also activate shelf recognition during manual control.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).set_manual_control(
+        enabled, use_shelf_registration=use_shelf_registration,
+    )
 
 
 @mcp.tool()
@@ -559,6 +642,115 @@ def set_velocity(ip: str, linear: float, angular: float) -> dict:
 def emergency_stop(ip: str) -> dict:
     """Immediately stop the robot and disable manual control."""
     return KachakaCommands(KachakaConnection.get(ip)).stop()
+
+
+# ── Torch / lighting ────────────────────────────────────────────────
+
+@mcp.tool()
+def set_front_torch(ip: str, intensity: int) -> dict:
+    """Set front LED torch intensity (0–255). 0 = off, 255 = max brightness."""
+    return KachakaCommands(KachakaConnection.get(ip)).set_front_torch(intensity)
+
+
+@mcp.tool()
+def set_back_torch(ip: str, intensity: int) -> dict:
+    """Set back LED torch intensity (0–255). 0 = off, 255 = max brightness."""
+    return KachakaCommands(KachakaConnection.get(ip)).set_back_torch(intensity)
+
+
+# ── Laser scan ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def activate_laser_scan(ip: str, duration_sec: float) -> dict:
+    """Activate laser scanner for on-demand LiDAR data collection.
+
+    The scanner stays active for ``duration_sec`` seconds.
+    """
+    return KachakaCommands(KachakaConnection.get(ip)).activate_laser_scan(duration_sec)
+
+
+# ── Auto homing ─────────────────────────────────────────────────────
+
+@mcp.tool()
+def set_auto_homing(ip: str, enabled: bool) -> dict:
+    """Enable or disable automatic return-to-charger when idle."""
+    return KachakaCommands(KachakaConnection.get(ip)).set_auto_homing(enabled)
+
+
+@mcp.tool()
+def get_auto_homing(ip: str) -> dict:
+    """Check whether automatic return-to-charger is enabled."""
+    return KachakaQueries(KachakaConnection.get(ip)).get_auto_homing_enabled()
+
+
+# ── Readiness ───────────────────────────────────────────────────────
+
+@mcp.tool()
+def is_ready(ip: str) -> dict:
+    """Check if the robot is ready to accept commands (non-blocking)."""
+    return KachakaQueries(KachakaConnection.get(ip)).is_ready()
+
+
+# ── Transforms ──────────────────────────────────────────────────────
+
+@mcp.tool()
+def get_static_transform(ip: str) -> dict:
+    """Get static TF coordinate transforms (e.g. base_link -> camera_link).
+
+    Useful for sensor fusion and custom navigation applications.
+    """
+    return KachakaQueries(KachakaConnection.get(ip)).get_static_transform()
+
+
+# ── Dynamic transforms (streaming) ──────────────────────────────────
+
+_tf_streamers: dict[str, TransformStreamer] = {}
+
+
+@mcp.tool()
+def start_transform_stream(ip: str) -> dict:
+    """Start streaming dynamic TF transforms in a background thread.
+
+    The robot pushes real-time coordinate transforms (e.g. odom -> base_link).
+    Use ``get_dynamic_transform`` to read the latest snapshot.
+    """
+    key = KachakaConnection._normalise_target(ip)
+    existing = _tf_streamers.get(key)
+    if existing is not None and existing.is_running:
+        return {"ok": True, "message": "already running", "stats": existing.stats}
+    conn = KachakaConnection.get(ip)
+    streamer = TransformStreamer(conn)
+    streamer.start()
+    _tf_streamers[key] = streamer
+    return {"ok": True, "message": "transform stream started"}
+
+
+@mcp.tool()
+def get_dynamic_transform(ip: str) -> dict:
+    """Get the latest dynamic TF transforms from a running stream.
+
+    Returns real-time coordinate transforms (translation + rotation quaternion).
+    Must call ``start_transform_stream`` first.
+    """
+    key = KachakaConnection._normalise_target(ip)
+    streamer = _tf_streamers.get(key)
+    if streamer is None or not streamer.is_running:
+        return {"ok": False, "error": "stream not started — call start_transform_stream first"}
+    transforms = streamer.latest_transforms
+    if transforms is None:
+        return {"ok": False, "error": "no transforms received yet — try again shortly"}
+    return {"ok": True, "transforms": transforms, "stats": streamer.stats}
+
+
+@mcp.tool()
+def stop_transform_stream(ip: str) -> dict:
+    """Stop the dynamic TF transform stream."""
+    key = KachakaConnection._normalise_target(ip)
+    streamer = _tf_streamers.pop(key, None)
+    if streamer is None:
+        return {"ok": True, "message": "no stream to stop"}
+    streamer.stop()
+    return {"ok": True, "message": "transform stream stopped", "stats": streamer.stats}
 
 
 # ── Entry point ──────────────────────────────────────────────────────

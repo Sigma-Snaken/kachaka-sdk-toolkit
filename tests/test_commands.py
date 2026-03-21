@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import grpc
@@ -226,6 +227,307 @@ class TestShortcut:
         result = KachakaCommands(conn).start_shortcut("bad-id")
         assert result["ok"] is False
         assert result["error_code"] == 12506
+
+
+class TestMapManagement:
+    def test_export_map_success(self):
+        mock_client = MagicMock()
+        mock_client.export_map.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        with tempfile.NamedTemporaryFile(suffix=".bin") as f:
+            # Write some data so os.path.getsize works
+            f.write(b"fake map data")
+            f.flush()
+            result = KachakaCommands(conn).export_map("map-123", f.name)
+
+        assert result["ok"] is True
+        assert result["action"] == "export_map"
+        assert result["map_id"] == "map-123"
+        assert result["size_bytes"] > 0
+
+    def test_export_map_failure(self):
+        mock_client = MagicMock()
+        mock_client.export_map.return_value = _make_result(False, error_code=999)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).export_map("bad-id", "/tmp/out.bin")
+        assert result["ok"] is False
+        assert result["error_code"] == 999
+
+    def test_import_map_success(self):
+        mock_client = MagicMock()
+        mock_client.import_map.return_value = (_make_result(True), "new-map-id")
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).import_map("/tmp/exported.bin")
+        assert result["ok"] is True
+        assert result["action"] == "import_map"
+        assert result["map_id"] == "new-map-id"
+
+    def test_import_map_failure(self):
+        mock_client = MagicMock()
+        mock_client.import_map.return_value = (_make_result(False, error_code=500), "")
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).import_map("/tmp/bad.bin")
+        assert result["ok"] is False
+
+    def test_import_image_as_map_success(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result.success = True
+        mock_response.map_id = "img-map-id"
+        conn = _make_conn(mock_client)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        mock_stub.ImportImageAsMap.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+            f.flush()
+            result = KachakaCommands(conn).import_image_as_map(
+                f.name, resolution=0.025, charger_x=5.0, charger_y=1.0,
+            )
+
+        assert result["ok"] is True
+        assert result["action"] == "import_image_as_map"
+        assert result["map_id"] == "img-map-id"
+        assert result["resolution"] == 0.025
+        assert result["charger_pose"]["x"] == 5.0
+        mock_stub.ImportImageAsMap.assert_called_once()
+
+    def test_import_image_as_map_failure(self):
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result.success = False
+        mock_response.result.error_code = 12508
+        conn = _make_conn(mock_client)
+        mock_stub = MagicMock()
+        mock_stub.ImportImageAsMap.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        with tempfile.NamedTemporaryFile(suffix=".png") as f:
+            f.write(b"\x89PNG\r\n\x1a\n")
+            f.flush()
+            result = KachakaCommands(conn).import_image_as_map(
+                f.name, resolution=0.05, charger_x=0.0, charger_y=0.0,
+            )
+
+        assert result["ok"] is False
+
+    def test_import_image_as_map_file_not_found(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).import_image_as_map(
+            "/tmp/nonexistent.png", resolution=0.025, charger_x=0.0, charger_y=0.0,
+        )
+        assert result["ok"] is False
+        assert "No such file" in result["error"]
+
+
+class TestSwitchMap:
+    def test_switch_map_success(self):
+        mock_client = MagicMock()
+        mock_client.switch_map.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map("map-456")
+        assert result["ok"] is True
+        assert result["action"] == "switch_map"
+        assert result["target"] == "map-456"
+        mock_client.switch_map.assert_called_once_with(
+            "map-456", pose=None, inherit_docking_state_and_docked_shelf=False,
+        )
+
+    def test_switch_map_with_pose(self):
+        mock_client = MagicMock()
+        mock_client.switch_map.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map(
+            "map-456", pose_x=1.0, pose_y=2.0, pose_theta=0.5,
+        )
+        assert result["ok"] is True
+        mock_client.switch_map.assert_called_once_with(
+            "map-456",
+            pose={"x": 1.0, "y": 2.0, "theta": 0.5},
+            inherit_docking_state_and_docked_shelf=False,
+        )
+
+    def test_switch_map_failure(self):
+        mock_client = MagicMock()
+        mock_client.switch_map.return_value = _make_result(False, error_code=999)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map("bad-map")
+        assert result["ok"] is False
+        assert result["error_code"] == 999
+
+    def test_switch_map_exception(self):
+        mock_client = MagicMock()
+        mock_client.switch_map.side_effect = Exception("connection lost")
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).switch_map("map-456")
+        assert result["ok"] is False
+        assert "connection lost" in result["error"]
+
+
+class TestTorch:
+    def test_set_front_torch(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result = _make_result(True)
+        mock_stub.SetFrontTorchIntensity.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        result = KachakaCommands(conn).set_front_torch(128)
+        assert result["ok"] is True
+        assert result["action"] == "set_front_torch"
+        mock_stub.SetFrontTorchIntensity.assert_called_once()
+
+    def test_set_front_torch_clamped(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result = _make_result(True)
+        mock_stub.SetFrontTorchIntensity.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        KachakaCommands(conn).set_front_torch(300)
+        call_args = mock_stub.SetFrontTorchIntensity.call_args
+        assert call_args[0][0].intensity == 255
+
+    def test_set_back_torch(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result = _make_result(True)
+        mock_stub.SetBackTorchIntensity.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        result = KachakaCommands(conn).set_back_torch(64)
+        assert result["ok"] is True
+        assert result["action"] == "set_back_torch"
+
+
+class TestLaserScan:
+    def test_activate_laser_scan(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result = _make_result(True)
+        mock_stub.ActivateLaserScan.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        result = KachakaCommands(conn).activate_laser_scan(5.0)
+        assert result["ok"] is True
+        assert result["action"] == "activate_laser_scan"
+        call_args = mock_stub.ActivateLaserScan.call_args
+        assert call_args[0][0].duration_sec == 5.0
+
+
+class TestAutoHoming:
+    def test_set_auto_homing_enabled(self):
+        mock_client = MagicMock()
+        mock_client.set_auto_homing_enabled.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_auto_homing(True)
+        assert result["ok"] is True
+        assert result["action"] == "set_auto_homing"
+        mock_client.set_auto_homing_enabled.assert_called_once_with(True)
+
+    def test_set_auto_homing_disabled(self):
+        mock_client = MagicMock()
+        mock_client.set_auto_homing_enabled.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_auto_homing(False)
+        assert result["ok"] is True
+        mock_client.set_auto_homing_enabled.assert_called_once_with(False)
+
+
+class TestManualControlShelfReg:
+    def test_manual_control_with_shelf_registration(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        mock_response = MagicMock()
+        mock_response.result = _make_result(True)
+        mock_stub.SetManualControlEnabled.return_value = mock_response
+        mock_client.stub = mock_stub
+
+        result = KachakaCommands(conn).set_manual_control(
+            True, use_shelf_registration=True,
+        )
+        assert result["ok"] is True
+        call_args = mock_stub.SetManualControlEnabled.call_args
+        req = call_args[0][0]
+        assert req.enable is True
+        assert req.use_shelf_registration is True
+
+    def test_manual_control_without_shelf_registration(self):
+        mock_client = MagicMock()
+        mock_client.set_manual_control_enabled.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).set_manual_control(True)
+        assert result["ok"] is True
+        mock_client.set_manual_control_enabled.assert_called_once_with(True)
+
+
+class TestMoveShelfAdvanced:
+    def test_move_shelf_undock_on_destination(self):
+        mock_client = MagicMock()
+        conn = _make_conn(mock_client)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        # Mock GetCommandState for cursor
+        cmd_state_resp = MagicMock()
+        cmd_state_resp.metadata.cursor = 100
+        mock_stub.GetCommandState.return_value = cmd_state_resp
+        # Mock StartCommand
+        start_resp = MagicMock()
+        start_resp.result.success = True
+        start_resp.command_id = "cmd-1"
+        mock_stub.StartCommand.return_value = start_resp
+        # Mock GetLastCommandResult
+        last_resp = MagicMock()
+        last_resp.metadata.cursor = 200
+        last_resp.command_id = "cmd-1"
+        mock_stub.GetLastCommandResult.return_value = last_resp
+        # Mock get_last_command_result for final result
+        mock_client.get_last_command_result.return_value = (_make_result(True), MagicMock())
+        mock_client.stub = mock_stub
+
+        result = KachakaCommands(conn).move_shelf(
+            "Shelf A", "Room 1", undock_on_destination=True,
+        )
+        assert result["ok"] is True
+        # Verify StartCommand was called (not sdk.move_shelf)
+        mock_stub.StartCommand.assert_called_once()
+        req = mock_stub.StartCommand.call_args[0][0]
+        assert req.command.move_shelf_command.undock_on_destination is True
+
+    def test_move_shelf_default_uses_sdk(self):
+        mock_client = MagicMock()
+        mock_client.move_shelf.return_value = _make_result(True)
+        conn = _make_conn(mock_client)
+
+        result = KachakaCommands(conn).move_shelf("Shelf A", "Room 1")
+        assert result["ok"] is True
+        mock_client.move_shelf.assert_called_once()
 
 
 class TestCancelCommand:

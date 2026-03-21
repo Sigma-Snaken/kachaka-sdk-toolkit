@@ -13,8 +13,11 @@ Patterns extracted from:
 from __future__ import annotations
 
 import logging
+import os
 import time
-from typing import Optional
+from typing import Iterator, Optional
+
+from kachaka_api.generated import kachaka_api_pb2 as pb2
 
 from .connection import KachakaConnection
 from .error_handling import with_retry
@@ -28,6 +31,59 @@ class KachakaCommands:
     def __init__(self, conn: KachakaConnection):
         self.conn = conn
         self.sdk = conn.client
+
+    # ── Advanced command execution ────────────────────────────────────
+
+    def _start_command_advanced(
+        self,
+        command: pb2.Command,
+        *,
+        cancel_all: bool = True,
+        tts_on_success: str = "",
+        title: str = "",
+        deferrable: bool = False,
+        lock_on_end_sec: float = 0.0,
+        wait_for_completion: bool = True,
+    ) -> pb2.Result:
+        """Low-level command dispatch with ``deferrable`` and ``lock_on_end`` support.
+
+        These parameters are defined in the gRPC proto but not exposed by the
+        official Python SDK convenience methods.
+        """
+        lock_on_end = None
+        if lock_on_end_sec > 0:
+            lock_on_end = pb2.LockOnEnd(duration_sec=lock_on_end_sec)
+
+        request = pb2.StartCommandRequest(
+            command=command,
+            cancel_all=cancel_all,
+            tts_on_success=tts_on_success,
+            title=title,
+            deferrable=deferrable,
+            lock_on_end=lock_on_end,
+        )
+
+        # Capture cursor before issuing the command
+        cursor_meta = pb2.Metadata(cursor=0)
+        cursor_meta.cursor = self.sdk.stub.GetCommandState(
+            pb2.GetRequest(metadata=cursor_meta)
+        ).metadata.cursor
+
+        response = self.sdk.stub.StartCommand(request)
+        if not response.result.success or not wait_for_completion:
+            return response.result
+
+        # Poll until our command_id appears in last result
+        while True:
+            last = self.sdk.stub.GetLastCommandResult(
+                pb2.GetRequest(metadata=cursor_meta)
+            )
+            cursor_meta.cursor = last.metadata.cursor
+            if last.command_id == response.command_id:
+                break
+
+        result, _ = self.sdk.get_last_command_result()
+        return result
 
     # ── Movement ─────────────────────────────────────────────────────
 
@@ -113,21 +169,52 @@ class KachakaCommands:
         shelf_name: str,
         location_name: str,
         *,
+        undock_on_destination: bool = False,
         cancel_all: bool = True,
         tts_on_success: str = "",
         title: str = "",
+        deferrable: bool = False,
+        lock_on_end_sec: float = 0.0,
     ) -> dict:
-        """Pick up *shelf_name* and deliver it to *location_name*."""
+        """Pick up *shelf_name* and deliver it to *location_name*.
+
+        Args:
+            undock_on_destination: Automatically undock the shelf at the
+                destination instead of staying docked (proto field not
+                exposed by the official SDK).
+            deferrable: Queue the command instead of cancelling the current one.
+            lock_on_end_sec: Lock the robot for this many seconds after the
+                command completes.
+        """
         self.conn.ensure_resolver()
         shelf_id = self.conn.resolve_shelf(shelf_name)
         location_id = self.conn.resolve_location(location_name)
-        result = self.sdk.move_shelf(
-            shelf_id,
-            location_id,
-            cancel_all=cancel_all,
-            tts_on_success=tts_on_success,
-            title=title,
-        )
+
+        use_advanced = undock_on_destination or deferrable or lock_on_end_sec > 0
+        if use_advanced:
+            cmd = pb2.Command(
+                move_shelf_command=pb2.MoveShelfCommand(
+                    target_shelf_id=shelf_id,
+                    destination_location_id=location_id,
+                    undock_on_destination=undock_on_destination,
+                )
+            )
+            result = self._start_command_advanced(
+                cmd,
+                cancel_all=cancel_all,
+                tts_on_success=tts_on_success,
+                title=title,
+                deferrable=deferrable,
+                lock_on_end_sec=lock_on_end_sec,
+            )
+        else:
+            result = self.sdk.move_shelf(
+                shelf_id,
+                location_id,
+                cancel_all=cancel_all,
+                tts_on_success=tts_on_success,
+                title=title,
+            )
         return self._result_to_dict(
             result, action="move_shelf", target=f"{shelf_name} -> {location_name}"
         )
@@ -228,6 +315,125 @@ class KachakaCommands:
         )
         return self._result_to_dict(result, action="start_shortcut", target=shortcut_id)
 
+    # ── Map management ────────────────────────────────────────────────
+
+    def export_map(self, map_id: str, output_path: str) -> dict:
+        """Export a map to a binary file (Kachaka proprietary format).
+
+        The exported file can be re-imported with ``import_map``.
+        """
+        try:
+            result = self.sdk.export_map(map_id, output_path)
+            if not result.success:
+                return self._result_to_dict(result, action="export_map", target=map_id)
+            size = os.path.getsize(output_path)
+            return {
+                "ok": True,
+                "action": "export_map",
+                "map_id": map_id,
+                "path": output_path,
+                "size_bytes": size,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "action": "export_map"}
+
+    def import_map(self, file_path: str, chunk_size: int = 1024 * 1024) -> dict:
+        """Import a map from a previously exported binary file.
+
+        Returns the new map ID assigned by the robot.
+        """
+        try:
+            result, map_id = self.sdk.import_map(file_path, chunk_size=chunk_size)
+            if not result.success:
+                return self._result_to_dict(result, action="import_map", target=file_path)
+            return {
+                "ok": True,
+                "action": "import_map",
+                "map_id": map_id,
+                "source": file_path,
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "action": "import_map"}
+
+    def import_image_as_map(
+        self,
+        image_path: str,
+        resolution: float,
+        charger_x: float,
+        charger_y: float,
+        charger_theta: float = 0.0,
+        chunk_size: int = 1024 * 1024,
+    ) -> dict:
+        """Import a PNG occupancy grid image as a new map (ROS-style).
+
+        Args:
+            image_path: Path to a grayscale PNG file (ROS occupancy grid format).
+            resolution: Meters per pixel.
+            charger_x: Charger X position in world coordinates.
+            charger_y: Charger Y position in world coordinates.
+            charger_theta: Charger orientation in radians.
+            chunk_size: Streaming chunk size in bytes.
+        """
+        try:
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+
+            charger_pose = pb2.Pose(x=charger_x, y=charger_y, theta=charger_theta)
+
+            def request_iterator() -> Iterator[pb2.ImportImageAsMapRequest]:
+                offset = 0
+                while offset < len(image_data):
+                    chunk = image_data[offset : offset + chunk_size]
+                    yield pb2.ImportImageAsMapRequest(
+                        data=chunk,
+                        charger_pose=charger_pose,
+                        resolution=resolution,
+                    )
+                    offset += chunk_size
+
+            response = self.sdk.stub.ImportImageAsMap(request_iterator())
+            if not response.result.success:
+                return self._result_to_dict(
+                    response.result, action="import_image_as_map", target=image_path,
+                )
+            return {
+                "ok": True,
+                "action": "import_image_as_map",
+                "map_id": response.map_id,
+                "source": image_path,
+                "resolution": resolution,
+                "charger_pose": {"x": charger_x, "y": charger_y, "theta": charger_theta},
+            }
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "action": "import_image_as_map"}
+
+    def switch_map(
+        self,
+        map_id: str,
+        *,
+        pose_x: Optional[float] = None,
+        pose_y: Optional[float] = None,
+        pose_theta: Optional[float] = None,
+        inherit_docking_state: bool = False,
+    ) -> dict:
+        """Switch to a different map.
+
+        Optionally specify an initial pose ``(pose_x, pose_y, pose_theta)``.
+        When no pose is given, the charger pose of the target map is used.
+        """
+        try:
+            pose = None
+            if pose_x is not None and pose_y is not None:
+                pose = {"x": pose_x, "y": pose_y, "theta": pose_theta or 0.0}
+            result = self.sdk.switch_map(
+                map_id,
+                pose=pose,
+                inherit_docking_state_and_docked_shelf=inherit_docking_state,
+            )
+            return self._result_to_dict(result, action="switch_map", target=map_id)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "action": "switch_map"}
+
     # ── Command control ──────────────────────────────────────────────
 
     @with_retry()
@@ -249,8 +455,27 @@ class KachakaCommands:
     # ── Manual control ───────────────────────────────────────────────
 
     @with_retry()
-    def set_manual_control(self, enabled: bool) -> dict:
-        """Enable or disable manual velocity control mode."""
+    def set_manual_control(
+        self,
+        enabled: bool,
+        *,
+        use_shelf_registration: bool = False,
+    ) -> dict:
+        """Enable or disable manual velocity control mode.
+
+        Args:
+            use_shelf_registration: When ``enabled=True``, also activate
+                shelf recognition during manual control (proto field not
+                exposed by the official SDK).
+        """
+        if use_shelf_registration and enabled:
+            request = pb2.SetManualControlEnabledRequest(
+                enable=True, use_shelf_registration=True,
+            )
+            response = self.sdk.stub.SetManualControlEnabled(request)
+            return self._result_to_dict(
+                response.result, action="set_manual_control", target="True+shelf_reg"
+            )
         result = self.sdk.set_manual_control_enabled(enabled)
         return self._result_to_dict(result, action="set_manual_control", target=str(enabled))
 
@@ -301,6 +526,57 @@ class KachakaCommands:
                 logger.debug("poll error: %s", exc)
             time.sleep(interval)
         return {"ok": False, "error": "timeout", "timeout": timeout}
+
+    # ── Torch / lighting ────────────────────────────────────────────
+
+    @with_retry()
+    def set_front_torch(self, intensity: int) -> dict:
+        """Set front LED torch intensity (0–255).
+
+        This gRPC RPC is not wrapped by the official Python SDK.
+        """
+        intensity = max(0, min(255, intensity))
+        request = pb2.SetFrontTorchIntensityRequest(intensity=intensity)
+        response = self.sdk.stub.SetFrontTorchIntensity(request)
+        return self._result_to_dict(
+            response.result, action="set_front_torch", target=str(intensity)
+        )
+
+    @with_retry()
+    def set_back_torch(self, intensity: int) -> dict:
+        """Set back LED torch intensity (0–255).
+
+        This gRPC RPC is not wrapped by the official Python SDK.
+        """
+        intensity = max(0, min(255, intensity))
+        request = pb2.SetBackTorchIntensityRequest(intensity=intensity)
+        response = self.sdk.stub.SetBackTorchIntensity(request)
+        return self._result_to_dict(
+            response.result, action="set_back_torch", target=str(intensity)
+        )
+
+    # ── Laser scan ───────────────────────────────────────────────────
+
+    @with_retry()
+    def activate_laser_scan(self, duration_sec: float) -> dict:
+        """Activate the laser scanner for *duration_sec* seconds.
+
+        This gRPC RPC is not wrapped by the official Python SDK.
+        Useful for on-demand LiDAR data collection.
+        """
+        request = pb2.ActivateLaserScanRequest(duration_sec=duration_sec)
+        response = self.sdk.stub.ActivateLaserScan(request)
+        return self._result_to_dict(
+            response.result, action="activate_laser_scan", target=f"{duration_sec}s"
+        )
+
+    # ── Auto homing ──────────────────────────────────────────────────
+
+    @with_retry()
+    def set_auto_homing(self, enabled: bool) -> dict:
+        """Enable or disable automatic return-to-charger behaviour."""
+        result = self.sdk.set_auto_homing_enabled(enabled)
+        return self._result_to_dict(result, action="set_auto_homing", target=str(enabled))
 
     # ── Internal ─────────────────────────────────────────────────────
 

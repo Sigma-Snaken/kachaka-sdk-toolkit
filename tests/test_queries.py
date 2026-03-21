@@ -1,4 +1,4 @@
-"""Tests for kachaka_core.queries — status, locations, camera, map."""
+"""Tests for kachaka_core.queries — status, locations, camera, map, transforms."""
 
 from __future__ import annotations
 
@@ -189,3 +189,100 @@ class TestRobotInfo:
 
         result = KachakaQueries(conn).get_version()
         assert result["version"] == "3.15.1"
+
+
+class TestIsReady:
+    def test_ready(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        mock_stub.IsReady.return_value = MagicMock(ready=True)
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).is_ready()
+        assert result["ok"] is True
+        assert result["ready"] is True
+
+    def test_not_ready(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        mock_stub = MagicMock()
+        mock_stub.IsReady.return_value = MagicMock(ready=False)
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).is_ready()
+        assert result["ok"] is True
+        assert result["ready"] is False
+
+
+class TestAutoHomingQuery:
+    def test_get_auto_homing_enabled(self):
+        mock = MagicMock()
+        mock.get_auto_homing_enabled.return_value = True
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).get_auto_homing_enabled()
+        assert result["ok"] is True
+        assert result["enabled"] is True
+
+    def test_get_auto_homing_disabled(self):
+        mock = MagicMock()
+        mock.get_auto_homing_enabled.return_value = False
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).get_auto_homing_enabled()
+        assert result["enabled"] is False
+
+
+class TestManualControlQuery:
+    def test_get_manual_control_enabled(self):
+        mock = MagicMock()
+        mock.get_manual_control_enabled.return_value = True
+        conn = _make_conn(mock)
+
+        result = KachakaQueries(conn).get_manual_control_enabled()
+        assert result["ok"] is True
+        assert result["enabled"] is True
+
+
+class TestStaticTransform:
+    def test_get_static_transform(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        # Re-assign stub after _make_conn (which replaces it with a real one)
+        mock_stub = MagicMock()
+        tf = MagicMock()
+        tf.header.frame_id = "base_link"
+        tf.child_frame_id = "camera_link"
+        tf.translation.x = 0.1
+        tf.translation.y = 0.0
+        tf.translation.z = 0.5
+        tf.rotation.x = 0.0
+        tf.rotation.y = 0.0
+        tf.rotation.z = 0.0
+        tf.rotation.w = 1.0
+        mock_stub.GetStaticTransform.return_value = MagicMock(transforms=[tf])
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).get_static_transform()
+        assert result["ok"] is True
+        assert len(result["transforms"]) == 1
+        t = result["transforms"][0]
+        assert t["frame_id"] == "base_link"
+        assert t["child_frame_id"] == "camera_link"
+        assert t["translation"]["x"] == 0.1
+        assert t["rotation"]["w"] == 1.0
+        assert "theta" in t
+        assert abs(t["theta"]) < 0.01  # identity rotation → theta ≈ 0
+
+    def test_get_static_transform_empty(self):
+        mock = MagicMock()
+        conn = _make_conn(mock)
+        mock_stub = MagicMock()
+        mock_stub.GetStaticTransform.return_value = MagicMock(transforms=[])
+        mock.stub = mock_stub
+
+        result = KachakaQueries(conn).get_static_transform()
+        assert result["ok"] is True
+        assert result["transforms"] == []
