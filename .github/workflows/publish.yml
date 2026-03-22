@@ -20,25 +20,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync version to marketplace.json
+      - name: Sync version to marketplace.json and setup.cfg
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           jq --arg v "$VERSION" '.plugins[0].version = $v' .claude-plugin/marketplace.json > tmp.json
           mv tmp.json .claude-plugin/marketplace.json
+          sed -i "s/^version = .*/version = $VERSION/" setup.cfg
+          sed -i "s/^fallback_version = .*/fallback_version = \"$VERSION\"/" pyproject.toml
 
-      - name: Commit marketplace.json if changed
+      - name: Commit version sync if changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .claude-plugin/marketplace.json
-          git diff --cached --quiet || git commit -m "chore: sync marketplace.json version to ${GITHUB_REF_NAME}"
+          git add .claude-plugin/marketplace.json setup.cfg pyproject.toml
+          git diff --cached --quiet || git commit -m "chore: sync versions to ${GITHUB_REF_NAME}"
           git push origin HEAD:master
-
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          sed -i "s/^version = .*/version = $VERSION/" setup.cfg
 
       - name: Build
         run: |
