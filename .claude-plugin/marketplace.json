@@ -1,12 +1,17 @@
 {
   "name": "kachaka-marketplace",
-  "owner": { "name": "Sigma-Snaken" },
+  "owner": {
+    "name": "Sigma-Snaken"
+  },
   "plugins": [
     {
       "name": "kachaka",
       "description": "Kachaka Robot SDK — 47 MCP tools for AI-driven robot control",
-      "version": "0.2.4",
-      "source": { "source": "github", "repo": "Sigma-Snaken/kachaka-sdk-toolkit" }
+      "version": "0.3.0",
+      "source": {
+        "source": "github",
+        "repo": "Sigma-Snaken/kachaka-sdk-toolkit"
+      }
     }
   ]
 }
