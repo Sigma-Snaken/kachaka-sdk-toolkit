@@ -26,7 +26,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RobotState:
-    """Snapshot of robot state, updated by the background polling thread."""
+    """Snapshot of robot state, updated by the background polling thread.
+
+    .. important::
+        ``connection_state`` here is an **internal copy** maintained by
+        the controller's polling loop.  It may lag behind the real
+        connectivity status.  External consumers (APIs, UIs, health
+        endpoints) should use ``KachakaConnection.state`` instead — it is
+        updated in real-time by the monitoring thread.
+    """
     battery_pct: int = 0
     pose_x: float = 0.0
     pose_y: float = 0.0

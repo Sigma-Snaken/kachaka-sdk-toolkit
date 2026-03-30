@@ -80,7 +80,21 @@ class KachakaConnection:
 
     @classmethod
     def get(cls, target: str, timeout: float = 5.0) -> KachakaConnection:
-        """Get or create a pooled connection for *target*."""
+        """Get or create a pooled connection for *target*.
+
+        .. tip::
+            Call :meth:`start_monitoring` after ``get()`` to enable
+            real-time :attr:`state` updates.  Without monitoring,
+            ``state`` will always read ``CONNECTED`` regardless of
+            actual connectivity::
+
+                conn = KachakaConnection.get("192.168.1.100")
+                conn.start_monitoring()          # ← enables conn.state
+                print(conn.state)                # CONNECTED or DISCONNECTED
+
+            If you need a callback on state transitions, pass
+            ``on_state_change`` to :meth:`start_monitoring`.
+        """
         key = cls._normalise_target(target)
         with cls._pool_lock:
             if key not in cls._pool:
@@ -179,9 +193,25 @@ class KachakaConnection:
 
     @property
     def state(self) -> ConnectionState:
-        """Current connection state (thread-safe read)."""
+        """Current connection state (thread-safe read).
+
+        This is the **recommended way** for external code to check whether
+        the robot is reachable.  The value is updated in real-time by the
+        monitoring thread (see :meth:`start_monitoring`).
+
+        .. note::
+            ``RobotController.state.connection_state`` is an *internal* copy
+            used by the controller's own state-loop.  External consumers
+            (APIs, UIs, health endpoints) should read
+            ``KachakaConnection.state`` instead for the most up-to-date
+            connectivity status.
+        """
         with self._state_lock:
             return self._state
+
+    @property
+    def _is_monitoring(self) -> bool:
+        return self._monitor_thread is not None and self._monitor_thread.is_alive()
 
     def start_monitoring(
         self,
@@ -190,9 +220,18 @@ class KachakaConnection:
     ) -> None:
         """Start background health-check loop.
 
+        **You must call this** if you want :attr:`state` to reflect
+        real connectivity.  Without monitoring, ``state`` is always
+        ``CONNECTED``.
+
         Args:
-            interval: Seconds between pings.
+            interval: Seconds between pings (default 5).
             on_state_change: Called on CONNECTED ↔ DISCONNECTED transitions.
+
+        .. note::
+            Idempotent — calling again while already running is a no-op.
+            ``RobotController.start()`` calls this internally, so if you
+            are using a controller you do not need to call it separately.
         """
         if self._monitor_thread is not None and self._monitor_thread.is_alive():
             return
