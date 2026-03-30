@@ -374,3 +374,107 @@ class TestCacheTier1:
         for t in threads:
             t.join()
         assert errors == []
+
+
+class TestCacheTier2:
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_shortcuts_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        sc = MagicMock()
+        sc.id = "sc-1"
+        sc.name = "Patrol A"
+        mock_client.get_shortcuts.return_value = [sc]
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        shortcuts = conn.shortcuts
+        assert len(shortcuts) == 1
+        assert shortcuts[0]["id"] == "sc-1"
+        _ = conn.shortcuts
+        mock_client.get_shortcuts.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_map_list_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        m = MagicMock()
+        m.id = "map-1"
+        m.name = "Floor1"
+        mock_client.get_map_list.return_value = [m]
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        maps = conn.map_list
+        assert len(maps) == 1
+        assert maps[0]["id"] == "map-1"
+        _ = conn.map_list
+        mock_client.get_map_list.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_current_map_id_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_current_map_id.return_value = "map-1"
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn.current_map_id == "map-1"
+        assert conn.current_map_id == "map-1"
+        mock_client.get_current_map_id.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_map_image_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        png_map = MagicMock()
+        png_map.data = b"\x89PNGtest"
+        png_map.resolution = 0.05
+        png_map.width = 200
+        png_map.height = 200
+        png_map.name = "Floor1"
+        png_map.origin = MagicMock(x=0.0, y=0.0)
+        mock_client.get_png_map.return_value = png_map
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        img = conn.map_image
+        assert img["width"] == 200
+        assert img["png_bytes"] == b"\x89PNGtest"
+        _ = conn.map_image
+        mock_client.get_png_map.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_refresh_shortcuts_clears_cache(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_shortcuts.return_value = []
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        _ = conn.shortcuts
+        conn.refresh_shortcuts()
+        _ = conn.shortcuts
+        assert mock_client.get_shortcuts.call_count == 2
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_refresh_maps_clears_all_map_cache(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_map_list.return_value = []
+        mock_client.get_current_map_id.return_value = "map-1"
+        png_map = MagicMock()
+        png_map.data = b"\x89PNG"
+        png_map.resolution = 0.05
+        png_map.width = 100
+        png_map.height = 100
+        png_map.name = "F1"
+        png_map.origin = MagicMock(x=0.0, y=0.0)
+        mock_client.get_png_map.return_value = png_map
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        _ = conn.map_list
+        _ = conn.current_map_id
+        _ = conn.map_image
+        conn.refresh_maps()
+        _ = conn.map_list
+        _ = conn.current_map_id
+        _ = conn.map_image
+        assert mock_client.get_map_list.call_count == 2
+        assert mock_client.get_current_map_id.call_count == 2
+        assert mock_client.get_png_map.call_count == 2

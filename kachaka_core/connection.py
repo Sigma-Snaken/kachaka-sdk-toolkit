@@ -62,6 +62,12 @@ class KachakaConnection:
         self._cached_version: Optional[str] = None
         self._cached_error_defs: Optional[dict[int, dict]] = None
 
+        # ── Device info cache (Tier 2 — semi-static, manual invalidation) ──
+        self._cached_shortcuts: Optional[list[dict]] = None
+        self._cached_map_list: Optional[list[dict]] = None
+        self._cached_current_map_id: Optional[str] = None
+        self._cached_map_image: Optional[dict] = None
+
         # ── Monitoring state ──
         self._state = ConnectionState.CONNECTED
         self._state_lock = threading.Lock()
@@ -304,6 +310,98 @@ class KachakaConnection:
                 logger.debug("Failed to fetch error definitions for %s", self.target)
                 return {}
         return self._cached_error_defs
+
+    # ── Device info cache (Tier 2 — semi-static) ────────────────────
+
+    @property
+    def shortcuts(self) -> list[dict]:
+        """Registered shortcuts (lazy-fetched, cached until refresh_shortcuts)."""
+        if self._cached_shortcuts is not None:
+            return self._cached_shortcuts
+        with self._cache_lock:
+            if self._cached_shortcuts is not None:
+                return self._cached_shortcuts
+            try:
+                raw = self.client.get_shortcuts()
+                self._cached_shortcuts = [
+                    {"id": sc.id, "name": sc.name} for sc in raw
+                ]
+            except Exception:
+                logger.debug("Failed to fetch shortcuts for %s", self.target)
+                return []
+        return self._cached_shortcuts
+
+    @property
+    def map_list(self) -> list[dict]:
+        """Available maps (lazy-fetched, cached until refresh_maps)."""
+        if self._cached_map_list is not None:
+            return self._cached_map_list
+        with self._cache_lock:
+            if self._cached_map_list is not None:
+                return self._cached_map_list
+            try:
+                raw = self.client.get_map_list()
+                self._cached_map_list = [
+                    {"id": m.id, "name": m.name} for m in raw
+                ]
+            except Exception:
+                logger.debug("Failed to fetch map list for %s", self.target)
+                return []
+        return self._cached_map_list
+
+    @property
+    def current_map_id(self) -> str:
+        """Active map ID (lazy-fetched, cached until refresh_maps)."""
+        if self._cached_current_map_id is not None:
+            return self._cached_current_map_id
+        with self._cache_lock:
+            if self._cached_current_map_id is not None:
+                return self._cached_current_map_id
+            try:
+                self._cached_current_map_id = self.client.get_current_map_id()
+            except Exception:
+                logger.debug("Failed to fetch current map ID for %s", self.target)
+                return ""
+        return self._cached_current_map_id
+
+    @property
+    def map_image(self) -> dict:
+        """Current map PNG data + metadata (lazy-fetched, cached until refresh_maps).
+
+        Returns dict with keys: png_bytes, name, resolution, width, height, origin_x, origin_y.
+        """
+        if self._cached_map_image is not None:
+            return self._cached_map_image
+        with self._cache_lock:
+            if self._cached_map_image is not None:
+                return self._cached_map_image
+            try:
+                png_map = self.client.get_png_map()
+                self._cached_map_image = {
+                    "png_bytes": png_map.data,
+                    "name": png_map.name,
+                    "resolution": png_map.resolution,
+                    "width": png_map.width,
+                    "height": png_map.height,
+                    "origin_x": png_map.origin.x,
+                    "origin_y": png_map.origin.y,
+                }
+            except Exception:
+                logger.debug("Failed to fetch map image for %s", self.target)
+                return {}
+        return self._cached_map_image
+
+    def refresh_shortcuts(self) -> None:
+        """Clear shortcuts cache so next access re-fetches."""
+        with self._cache_lock:
+            self._cached_shortcuts = None
+
+    def refresh_maps(self) -> None:
+        """Clear map_list, current_map_id, and map_image caches."""
+        with self._cache_lock:
+            self._cached_map_list = None
+            self._cached_current_map_id = None
+            self._cached_map_image = None
 
     # ── Internal ─────────────────────────────────────────────────────
 
