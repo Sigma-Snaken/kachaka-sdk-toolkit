@@ -430,7 +430,10 @@ class KachakaCommands:
                 pose=pose,
                 inherit_docking_state_and_docked_shelf=inherit_docking_state,
             )
-            return self._result_to_dict(result, action="switch_map", target=map_id)
+            d = self._result_to_dict(result, action="switch_map", target=map_id)
+            if d["ok"]:
+                self.conn.refresh_maps()
+            return d
         except Exception as exc:
             return {"ok": False, "error": str(exc), "action": "switch_map"}
 
@@ -581,14 +584,10 @@ class KachakaCommands:
     # ── Internal ─────────────────────────────────────────────────────
 
     def _resolve_error_description(self, error_code: int) -> str:
-        """Fetch error description from robot. Returns empty string on failure."""
-        try:
-            definitions = self.sdk.get_robot_error_code()
-            if error_code in definitions:
-                info = definitions[error_code]
-                return getattr(info, "title_en", "") or getattr(info, "title", "") or ""
-        except Exception:
-            logger.debug("Failed to fetch error description for %d", error_code)
+        """Look up error description from cached definitions."""
+        defs = self.conn.error_definitions
+        if error_code in defs:
+            return defs[error_code].get("title", "")
         return ""
 
     def _result_to_dict(self, result, *, action: str = "", target: str = "") -> dict:

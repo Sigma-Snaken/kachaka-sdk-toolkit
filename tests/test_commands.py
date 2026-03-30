@@ -574,3 +574,24 @@ class TestPollUntilComplete:
 
         assert result["ok"] is False
         assert result["error"] == "timeout"
+
+
+class TestSwitchMapInvalidation:
+    def test_switch_map_invalidates_map_cache(self):
+        mock = MagicMock()
+        mock_result = MagicMock(success=True, error_code=0)
+        mock.switch_map.return_value = mock_result
+        with patch("kachaka_core.connection.KachakaApiClient", return_value=mock):
+            KachakaConnection.clear_pool()
+            conn = KachakaConnection.get("test-robot-sw")
+            conn._cached_current_map_id = "old-map"
+            conn._cached_map_list = [{"id": "old-map", "name": "Old"}]
+            conn._cached_map_image = {"png_bytes": b"old"}
+
+            cmds = KachakaCommands(conn)
+            cmds.switch_map("new-map")
+
+            assert conn._cached_current_map_id is None
+            assert conn._cached_map_list is None
+            assert conn._cached_map_image is None
+            KachakaConnection.clear_pool()

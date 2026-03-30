@@ -284,14 +284,10 @@ class RobotController:
     # ── Error resolution ─────────────────────────────────────
 
     def _resolve_error_description(self, error_code: int) -> str:
-        """Fetch error description from robot. Returns empty string on failure."""
-        try:
-            definitions = self._conn.client.get_robot_error_code()
-            if error_code in definitions:
-                info = definitions[error_code]
-                return getattr(info, "title_en", "") or getattr(info, "title", "") or ""
-        except Exception:
-            logger.debug("Failed to fetch error description for %d", error_code)
+        """Look up error description from cached definitions."""
+        defs = self._conn.error_definitions
+        if error_code in defs:
+            return defs[error_code].get("title", "")
         return ""
 
     # ── Command execution engine ──────────────────────────────
