@@ -284,3 +284,93 @@ class TestMonitoring:
         thread2 = conn._monitor_thread
         assert thread1 is thread2
         conn.stop_monitoring()
+
+
+class TestCacheTier1:
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_serial_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.return_value = "BKP40EB1T"
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        # _ensure_connected calls get_robot_serial_number once for connectivity check
+        calls_after_connect = mock_client.get_robot_serial_number.call_count
+        assert conn.serial == "BKP40EB1T"
+        assert conn.serial == "BKP40EB1T"  # second access uses cache
+        # Only one additional call from the serial property (second access is cached)
+        assert mock_client.get_robot_serial_number.call_count == calls_after_connect + 1
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_version_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_version.return_value = "3.15.4"
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn.version == "3.15.4"
+        assert conn.version == "3.15.4"
+        mock_client.get_robot_version.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_error_definitions_lazy_fetched_and_cached(self, mock_cls):
+        mock_client = MagicMock()
+        err_info = MagicMock()
+        err_info.title_en = "Shelf dropped"
+        err_info.description_en = "dropped during movement"
+        err_info.title = ""
+        err_info.description = ""
+        mock_client.get_robot_error_code.return_value = {14606: err_info}
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        defs = conn.error_definitions
+        assert 14606 in defs
+        assert defs[14606]["title"] == "Shelf dropped"
+        _ = conn.error_definitions
+        mock_client.get_robot_error_code.assert_called_once()
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_error_definitions_fetch_failure_returns_empty(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_error_code.side_effect = RuntimeError("gRPC down")
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn.error_definitions == {}
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_serial_fetch_failure_returns_empty(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.side_effect = RuntimeError("fail")
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        assert conn.serial == ""
+
+    @patch("kachaka_core.connection.KachakaApiClient")
+    def test_cache_thread_safe(self, mock_cls):
+        mock_client = MagicMock()
+        mock_client.get_robot_serial_number.return_value = "KCK-001"
+        mock_client.get_robot_version.return_value = "3.15.4"
+        mock_client.get_robot_error_code.return_value = {}
+        mock_cls.return_value = mock_client
+
+        conn = KachakaConnection.get("1.2.3.4")
+        errors = []
+
+        def read_all():
+            for _ in range(20):
+                try:
+                    _ = conn.serial
+                    _ = conn.version
+                    _ = conn.error_definitions
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=read_all) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []

@@ -56,6 +56,12 @@ class KachakaConnection:
         self._locations: dict[str, str] = {}
         self._location_ids: set[str] = set()
 
+        # ── Device info cache (Tier 1 — permanent) ──
+        self._cache_lock = threading.Lock()
+        self._cached_serial: Optional[str] = None
+        self._cached_version: Optional[str] = None
+        self._cached_error_defs: Optional[dict[int, dict]] = None
+
         # ── Monitoring state ──
         self._state = ConnectionState.CONNECTED
         self._state_lock = threading.Lock()
@@ -241,6 +247,63 @@ class KachakaConnection:
                 self._set_state(ConnectionState.CONNECTED)
             else:
                 self._set_state(ConnectionState.DISCONNECTED)
+
+    # ── Device info cache (Tier 1 — permanent) ──────────────────────
+
+    @property
+    def serial(self) -> str:
+        """Robot serial number (lazy-fetched, permanently cached)."""
+        if self._cached_serial is not None:
+            return self._cached_serial
+        with self._cache_lock:
+            if self._cached_serial is not None:
+                return self._cached_serial
+            try:
+                self._cached_serial = self.client.get_robot_serial_number()
+            except Exception:
+                logger.debug("Failed to fetch serial for %s", self.target)
+                return ""
+        return self._cached_serial
+
+    @property
+    def version(self) -> str:
+        """Firmware version string (lazy-fetched, permanently cached)."""
+        if self._cached_version is not None:
+            return self._cached_version
+        with self._cache_lock:
+            if self._cached_version is not None:
+                return self._cached_version
+            try:
+                self._cached_version = self.client.get_robot_version()
+            except Exception:
+                logger.debug("Failed to fetch version for %s", self.target)
+                return ""
+        return self._cached_version
+
+    @property
+    def error_definitions(self) -> dict[int, dict]:
+        """All error code definitions {code: {"title": str, "description": str}}.
+
+        Lazy-fetched from firmware, permanently cached for the session.
+        """
+        if self._cached_error_defs is not None:
+            return self._cached_error_defs
+        with self._cache_lock:
+            if self._cached_error_defs is not None:
+                return self._cached_error_defs
+            try:
+                raw = self.client.get_robot_error_code()
+                self._cached_error_defs = {
+                    code: {
+                        "title": getattr(info, "title_en", "") or getattr(info, "title", "") or "",
+                        "description": getattr(info, "description_en", "") or getattr(info, "description", "") or "",
+                    }
+                    for code, info in raw.items()
+                }
+            except Exception:
+                logger.debug("Failed to fetch error definitions for %s", self.target)
+                return {}
+        return self._cached_error_defs
 
     # ── Internal ─────────────────────────────────────────────────────
 
