@@ -2,7 +2,7 @@
   "kachaka": {
     "command": "uvx",
     "args": [
-      "--from", "git+https://github.com/Sigma-Snaken/kachaka-sdk-toolkit",
+      "--from", "kachaka-sdk-toolkit",
       "kachaka-mcp"
     ]
   }
