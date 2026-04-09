@@ -13,7 +13,7 @@ from kachaka_core.playground import PlaygroundSSH
 
 def _run(coro):
     """Helper to run async coroutine in sync test."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 class TestConnect:
@@ -92,6 +92,7 @@ class TestRun:
             result = _run(PlaygroundSSH.run("192.168.1.10", "test.py", "/tmp/test.log"))
 
         assert result["ok"] is True
+        assert result["pid"] == 1234
         assert result["log_path"] == "/tmp/test.log"
 
 
