@@ -713,3 +713,251 @@ The underlying `kachaka-api` SDK (v3.10+) provides:
 - **Proto types**: `pb2.Result`, `pb2.Pose`, `pb2.Command`, etc.
 
 `kachaka_core` wraps the sync client with connection pooling, retry logic, and structured responses. The async client is available for advanced use cases (streaming, callbacks) but is not wrapped by this toolkit.
+
+## Playground Offline Execution
+
+Run scripts directly on the robot's on-board Docker container (Playground).
+Scripts use `kachaka_api` (the raw SDK) — NOT `kachaka_core` — because the
+container has only the pre-installed SDK.
+
+### When to Use
+
+- Factory/warehouse with unreliable WiFi — script runs offline after deployment
+- Multi-stop routes that must survive network drops
+- Long-running autonomous tasks (patrol, inspection, delivery)
+
+### SSH Key Setup (Prerequisites)
+
+Before using `playground_*` MCP tools, set up SSH key auth:
+
+1. **Generate a key** (if you don't have one):
+   ```bash
+   ssh-keygen -t ed25519
+   ```
+2. **Upload public key** via JupyterLab:
+   - Open `http://<robot-ip>:26501` in browser (password: `kachaka`)
+   - Open a Terminal from the JupyterLab launcher
+   - Run:
+     ```bash
+     mkdir -p ~/.ssh
+     echo 'PASTE_YOUR_PUBLIC_KEY_HERE' >> ~/.ssh/authorized_keys
+     ```
+3. **Verify** from your machine:
+   ```bash
+   ssh -p 26500 kachaka@<robot-ip>
+   ```
+
+> The MCP tools auto-detect SSH keys (agent → `~/.ssh/id_ed25519` → `~/.ssh/id_rsa`). No need to specify the key path.
+
+### Container Environment Constraints
+
+When generating scripts for Playground, follow these rules:
+
+| Rule | Detail |
+|------|--------|
+| Client | `kachaka_api.KachakaApiClient("100.94.1.1:26400")` |
+| Resolver | Must call `client.update_resolver()` before name-based commands |
+| Libraries | stdlib only: `json`, `threading`, `time`, `logging`, `signal`, etc. |
+| Blocking | All move commands block by default (`wait_for_completion=True`) |
+| Script path | `/home/kachaka/<filename>` |
+| Log path | `/tmp/<filename>.log` |
+| Firmware | Updates may wipe `/home/kachaka/` — scripts need re-upload |
+
+> :x: **NEVER**: Use `kachaka_core` inside Playground scripts — it's not installed in the container
+> :x: **NEVER**: Forget `client.update_resolver()` — names sent as raw IDs cause error_code 10250
+> :x: **NEVER**: Start an HTTP server — only ports 26400/26500/26501 are exposed
+
+### MCP Tool Workflow
+
+```
+1. Claude generates script content (using snippets below)
+2. playground_upload(ip, script_content, filename)   → push to container
+3. playground_run(ip, filename)                       → start in background
+4. playground_log(ip)                                 → monitor output
+5. playground_stop(ip, filename)                      → stop if needed
+6. playground_status(ip, filename)                    → check if still running
+```
+
+### Composable Code Snippets
+
+Combine these building blocks to generate complete scripts.
+
+#### Snippet 1: Basic Scaffold
+
+Every Playground script starts with this:
+
+```python
+#!/usr/bin/env python3
+"""<description> — auto-generated for Kachaka Playground."""
+
+import logging
+import signal
+import sys
+import time
+
+import kachaka_api
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+log = logging.getLogger(__name__)
+
+# ── Graceful shutdown ──
+_shutdown = False
+
+def _handle_signal(sig, frame):
+    global _shutdown
+    log.info("Received signal %s, shutting down...", sig)
+    _shutdown = True
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
+
+# ── Client init ──
+client = kachaka_api.KachakaApiClient("100.94.1.1:26400")
+client.update_resolver()
+log.info("Connected and resolver initialized")
+```
+
+#### Snippet 2: IMU Shake Detection
+
+Background thread with arm/disarm gating:
+
+```python
+import threading
+
+ACCEL_THRESHOLD = 11.0   # m/s²
+GYRO_THRESHOLD = 0.8     # rad/s
+IMU_POLL_INTERVAL = 0.1  # seconds
+
+shake_event = threading.Event()
+_imu_armed = False
+_imu_lock = threading.Lock()
+
+def arm_imu():
+    global _imu_armed
+    with _imu_lock:
+        shake_event.clear()
+        _imu_armed = True
+    log.info("IMU armed")
+
+def disarm_imu():
+    global _imu_armed
+    with _imu_lock:
+        _imu_armed = False
+    log.info("IMU disarmed")
+
+def _imu_monitor():
+    """Background thread: poll IMU and fire shake_event."""
+    recent = [False, False, False]
+    idx = 0
+    while not _shutdown:
+        with _imu_lock:
+            armed = _imu_armed
+        if not armed:
+            time.sleep(IMU_POLL_INTERVAL)
+            continue
+        try:
+            imu = client.get_ros_imu()
+            accel = (imu.linear_acceleration.x ** 2
+                     + imu.linear_acceleration.y ** 2
+                     + imu.linear_acceleration.z ** 2) ** 0.5
+            gyro = (imu.angular_velocity.x ** 2
+                    + imu.angular_velocity.y ** 2
+                    + imu.angular_velocity.z ** 2) ** 0.5
+            exceeded = (accel > ACCEL_THRESHOLD) or (gyro > GYRO_THRESHOLD)
+            recent[idx % 3] = exceeded
+            idx += 1
+            if sum(recent) >= 2:
+                log.info("Shake detected! accel=%.2f gyro=%.3f", accel, gyro)
+                disarm_imu()
+                shake_event.set()
+        except Exception as e:
+            log.warning("IMU read error: %s", e)
+        time.sleep(IMU_POLL_INTERVAL)
+
+imu_thread = threading.Thread(target=_imu_monitor, daemon=True)
+imu_thread.start()
+```
+
+#### Snippet 3: Route Execution with Shelf
+
+Sequential multi-stop delivery:
+
+```python
+SHELF = "s1"
+STOPS = [
+    {"name": "Station A", "timeout_sec": 30},
+    {"name": "Station B", "timeout_sec": 30},
+]
+
+for stop in STOPS:
+    if _shutdown:
+        break
+    log.info("Moving to %s with shelf %s", stop["name"], SHELF)
+    client.move_shelf(SHELF, stop["name"])
+    log.info("Arrived at %s", stop["name"])
+    client.speak("到站，請取貨")
+
+    # Wait for shake or timeout
+    time.sleep(2)  # settle before arming
+    arm_imu()
+    shook = shake_event.wait(timeout=stop["timeout_sec"])
+    disarm_imu()
+
+    if shook:
+        log.info("Shake confirmed at %s", stop["name"])
+        client.speak("收到，前往下一站")
+    else:
+        log.info("Timeout at %s, moving on", stop["name"])
+        client.speak("超時，即將前往下一站")
+
+# Return home
+log.info("Route complete, returning shelf and going home")
+client.return_shelf(SHELF)
+client.return_home()
+log.info("Done")
+```
+
+#### Snippet 4: Route Without Shelf (move_to_location)
+
+Same pattern but without shelf operations:
+
+```python
+STOPS = [
+    {"name": "Station A", "timeout_sec": 30},
+    {"name": "Station B", "timeout_sec": 30},
+]
+
+for stop in STOPS:
+    if _shutdown:
+        break
+    log.info("Moving to %s", stop["name"])
+    client.move_to_location(stop["name"])
+    log.info("Arrived at %s", stop["name"])
+    client.speak("到站")
+
+    time.sleep(2)
+    arm_imu()
+    shook = shake_event.wait(timeout=stop["timeout_sec"])
+    disarm_imu()
+
+    if shook:
+        log.info("Shake confirmed at %s", stop["name"])
+    else:
+        log.info("Timeout at %s", stop["name"])
+
+client.return_home()
+log.info("Done")
+```
+
+### Example Combinations
+
+| Use Case | Snippets |
+|----------|----------|
+| Delivery patrol with shake confirm | 1 + 2 + 3 |
+| Location patrol (no shelf) | 1 + 2 + 4 |
+| Photo capture then batch return | 1 + 3 (replace shake wait with `client.get_front_camera_image()` + collect, then upload after route) |
+| Stationary shake trigger | 1 + 2 (arm immediately, wait for event) |
