@@ -9,7 +9,6 @@ Transport: stdio (default for Claude Desktop / Claude Code).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
@@ -784,7 +783,7 @@ def stop_transform_stream(ip: str) -> dict:
 
 
 @mcp.tool()
-def playground_upload(
+async def playground_upload(
     ip: str, script_content: str, filename: str = "script.py",
 ) -> dict:
     """Upload a Python script to the Kachaka Playground container via SSH.
@@ -792,11 +791,11 @@ def playground_upload(
     The script is written to /home/kachaka/<filename> on the robot's
     on-board Docker container. Use ``playground_run`` to execute it.
     """
-    return asyncio.run(PlaygroundSSH.upload(ip, script_content, filename))
+    return await PlaygroundSSH.upload(ip, script_content, filename)
 
 
 @mcp.tool()
-def playground_run(
+async def playground_run(
     ip: str, filename: str = "script.py", log_path: str = "/tmp/script.log",
 ) -> dict:
     """Start a script in background on the Playground container.
@@ -804,33 +803,33 @@ def playground_run(
     The script runs detached (nohup) so it survives SSH disconnection.
     Output is redirected to ``log_path``. Use ``playground_log`` to read it.
     """
-    return asyncio.run(PlaygroundSSH.run(ip, filename, log_path))
+    return await PlaygroundSSH.run(ip, filename, log_path)
 
 
 @mcp.tool()
-def playground_stop(ip: str, filename: str = "script.py") -> dict:
+async def playground_stop(ip: str, filename: str = "script.py") -> dict:
     """Stop a running script on the Playground container (pkill -f)."""
-    return asyncio.run(PlaygroundSSH.stop(ip, filename))
+    return await PlaygroundSSH.stop(ip, filename)
 
 
 @mcp.tool()
-def playground_log(
+async def playground_log(
     ip: str, log_path: str = "/tmp/script.log", tail_lines: int = 50,
 ) -> dict:
     """Read the tail of a script log from the Playground container.
 
     Returns the last ``tail_lines`` lines from the log file.
     """
-    return asyncio.run(PlaygroundSSH.log(ip, log_path, tail_lines))
+    return await PlaygroundSSH.log(ip, log_path, tail_lines)
 
 
 @mcp.tool()
-def playground_status(ip: str, filename: str = "script.py") -> dict:
+async def playground_status(ip: str, filename: str = "script.py") -> dict:
     """Check if a script is currently running on the Playground container.
 
     Returns running state and PID if active.
     """
-    return asyncio.run(PlaygroundSSH.status(ip, filename))
+    return await PlaygroundSSH.status(ip, filename)
 
 
 # ── Entry point ──────────────────────────────────────────────────────
