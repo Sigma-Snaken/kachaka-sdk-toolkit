@@ -11,5 +11,6 @@ from .camera import CameraStreamer
 from .controller import RobotController
 from .detection import ObjectDetector
 from .transform import TransformStreamer
+from .playground import PlaygroundSSH
 
-__all__ = ["KachakaConnection", "ConnectionState", "KachakaCommands", "KachakaQueries", "CameraStreamer", "RobotController", "ObjectDetector", "TransformStreamer"]
+__all__ = ["KachakaConnection", "ConnectionState", "KachakaCommands", "KachakaQueries", "CameraStreamer", "RobotController", "ObjectDetector", "TransformStreamer", "PlaygroundSSH"]
