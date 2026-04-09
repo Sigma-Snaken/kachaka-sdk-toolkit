@@ -684,6 +684,8 @@ def my_new_command(ip: str, param: str) -> dict:
 | Shelf drop detection | `RobotController` (auto-tracks) | Poll `get_moving_shelf()` yourself |
 | Error descriptions | Auto-enriched in all results | `get_error_definitions()` + manual lookup |
 | gRPC timeout protection | `TimeoutInterceptor` (5s default) | Per-call `timeout=` parameter |
+| Deploy script to robot | `playground_upload` + `playground_run` MCP tools | `scp` + `ssh` commands manually |
+| Offline route execution | Playground snippets (scaffold + IMU + route) | Custom scripts from scratch |
 
 ## Anti-patterns Summary
 
@@ -701,6 +703,8 @@ See inline :x: markers throughout this document for detailed anti-patterns with 
 | IP | Hard-coded robot IP | Parameter or env var |
 | Install | `git+https://` or copy source | `pip install kachaka-sdk-toolkit` (PyPI) |
 | State check | Only check command state | Also check `command_id` change |
+| Playground | `kachaka_core` inside container | `kachaka_api` direct (pre-installed) |
+| Playground | Forget `update_resolver()` | Always call after client init |
 
 ## SDK Reference
 
